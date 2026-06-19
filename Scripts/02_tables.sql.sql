@@ -1,4 +1,9 @@
+<<<<<<< HEAD:Scripts/02_tables.sql.sql
 	TABLE Setores (
+=======
+-- TABELA 1: Setores da Fábrica
+CREATE TABLE Setores (
+>>>>>>> d3f437afe9817c07c6dfd889346b3ecbf62baf9b:Scripts/02_tables.sql
     id_setor INT AUTO_INCREMENT PRIMARY KEY,
     nome_setor VARCHAR(50) NOT NULL UNIQUE,
     descricao_setor VARCHAR(150)
@@ -28,7 +33,11 @@ CREATE TABLE Logs_Acesso (
 
 CREATE TABLE Modelos_Maquinas (
     id_modelo INT AUTO_INCREMENT PRIMARY KEY,
+<<<<<<< HEAD:Scripts/02_tables.sql.sql
     nome_maquina VARCHAR(50) NOT NULL,
+=======
+    nome_maquina varchar(50) not null,
+>>>>>>> d3f437afe9817c07c6dfd889346b3ecbf62baf9b:Scripts/02_tables.sql
     fabricante_maquina VARCHAR(50) NOT NULL,
     nome_modelo VARCHAR(100) NOT NULL,
     descricao_tecnica TEXT,
@@ -48,10 +57,17 @@ CREATE TABLE Maquinas_Ativos (
     id_setor INT NOT NULL,
     FOREIGN KEY (id_modelo) REFERENCES Modelos_Maquinas(id_modelo),
     FOREIGN KEY (id_setor) REFERENCES Setores(id_setor),
+<<<<<<< HEAD:Scripts/02_tables.sql.sql
     CONSTRAINT fk_ativos_modelo_nome 
     FOREIGN KEY (id_modelo, nome_maquina) 
     REFERENCES Modelos_Maquinas(id_modelo, nome_maquina)
     ON UPDATE CASCADE
+=======
+	CONSTRAINT fk_ativos_modelo_nome 
+	FOREIGN KEY (id_modelo, nome_maquina) 
+	REFERENCES Modelos_Maquinas(id_modelo, nome_maquina)
+	ON UPDATE CASCADE
+>>>>>>> d3f437afe9817c07c6dfd889346b3ecbf62baf9b:Scripts/02_tables.sql
 );
 
 CREATE TABLE Almoxarifado_Pecas (
@@ -111,3 +127,13 @@ CREATE TABLE OS_Seguranca (
     FOREIGN KEY (id_os) REFERENCES Ordens_Servico(id_os) ON DELETE CASCADE,
     FOREIGN KEY (id_risco) REFERENCES Matriz_Riscos_EPI(id_risco)
 );
+<<<<<<< HEAD:Scripts/02_tables.sql.sql
+=======
+
+-- ÍNDICES DE PERFORMANCE
+CREATE INDEX idx_os_datas ON Ordens_Servico(data_abertura);
+CREATE INDEX idx_os_status_atual ON Ordens_Servico(status_os);
+CREATE INDEX idx_ativos_setor ON Maquinas_Ativos(id_setor);
+CREATE INDEX idx_usuarios_login ON Usuarios(email_usuario, status_usuario);
+CREATE INDEX idx_logs_data ON Logs_Acesso(data_hora);
+>>>>>>> d3f437afe9817c07c6dfd889346b3ecbf62baf9b:Scripts/02_tables.sql
