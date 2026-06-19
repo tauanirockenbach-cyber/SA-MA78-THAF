@@ -1,5 +1,3 @@
--- Active: 1781783671031@@manutencao-thaf-samanutencao.b.aivencloud.com@16536@Manutencao
-
 -- TABELA 1: Setores da Fábrica
 CREATE TABLE Setores (
     id_setor INT AUTO_INCREMENT PRIMARY KEY,
@@ -34,6 +32,7 @@ CREATE TABLE Logs_Acesso (
 -- TABELA 4: Modelos de Máquinas
 CREATE TABLE Modelos_Maquinas (
     id_modelo INT AUTO_INCREMENT PRIMARY KEY,
+    nome_maquina varchar(50) not null,
     fabricante_maquina VARCHAR(50) NOT NULL,
     nome_modelo VARCHAR(100) NOT NULL,
     descricao_tecnica TEXT,
@@ -44,6 +43,7 @@ CREATE TABLE Modelos_Maquinas (
 CREATE TABLE Maquinas_Ativos (
     tag_equipamento VARCHAR(20) PRIMARY KEY, 
     id_modelo INT NOT NULL,
+    nome_maquina VARCHAR(50) NOT NULL,
     numero_serie VARCHAR(50) NOT NULL UNIQUE,
     localizacao_maquina VARCHAR(100) NOT NULL,       
     tipo_manutencao_padrao ENUM('Preventiva', 'Corretiva', 'Preditiva') NOT NULL,
@@ -51,7 +51,11 @@ CREATE TABLE Maquinas_Ativos (
     ultima_manutencao DATE,
     id_setor INT NOT NULL,
     FOREIGN KEY (id_modelo) REFERENCES Modelos_Maquinas(id_modelo),
-    FOREIGN KEY (id_setor) REFERENCES Setores(id_setor)
+    FOREIGN KEY (id_setor) REFERENCES Setores(id_setor),
+	CONSTRAINT fk_ativos_modelo_nome 
+	FOREIGN KEY (id_modelo, nome_maquina) 
+	REFERENCES Modelos_Maquinas(id_modelo, nome_maquina)
+	ON UPDATE CASCADE
 );
 
 
