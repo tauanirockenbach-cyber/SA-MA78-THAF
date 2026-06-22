@@ -64,3 +64,41 @@ join OS_Seguranca as S on OS.id_os = S.id_os
 join Matriz_Riscos_EPI as EPI on EPI.id_risco = S.id_risco
 where OS.id_os = 1001;
 
+-- OS concluídas por cada técnico
+select U.nome_usuario, count(OS.id_os) as OS_concluidas 
+from Usuarios as U
+join Ordens_Servico as OS on OS.id_tecnico_responsavel = U.id_usuario
+where status_os = 'Concluído'
+group by U.nome_usuario;
+
+-- Quais setores geraram o maior custo com manutenção de peças?
+select S.nome_setor, sum(OM.quantidade_utilizada * A.custo_unitario) as Valor_gasto_pecas
+from OS_Materiais as OM
+join Almoxarifado_Pecas as A on A.id_peca = OM.id_peca
+join Ordens_Servico as OS on OS.id_os = OM.id_os
+join Maquinas_Ativos as MA on MA.tag_equipamento = OS.tag_equipamento
+join Setores as S on S.id_setor = MA.id_setor
+group by S.nome_setor
+order by Valor_gasto_pecas DESC;
+
+-- Quais ferramentas nunca foram utilizadas em nenhuma Ordem de Serviço?
+select nome_ferramenta as ferramentas_nao_utilizadas 
+from Almoxarifado_Ferramentas
+where id_ferramenta not in (select id_ferramenta from OS_Ferramentas);
+
+-- Quantidade de Máquina por Fabricante
+select fabricante_maquina, count(nome_maquina) from Modelos_Maquinas
+group by fabricante_maquina;
+
+-- Qual foi o ultimo registro de atividade de cada usuário?
+select nome_usuario, max(data_hora)
+from Logs_Acesso as LA
+join Usuarios as U on LA.id_usuario = U.id_usuario
+group by LA.id_usuario;
+
+-- OS em andamento por cada técnico
+select U.nome_usuario, count(OS.id_os) as OS_em_andamento 
+from Usuarios as U
+join Ordens_Servico as OS on OS.id_tecnico_responsavel = U.id_usuario
+where status_os = 'Em andamento'
+group by U.nome_usuario;
