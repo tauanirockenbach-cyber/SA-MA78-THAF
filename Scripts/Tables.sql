@@ -16,6 +16,23 @@ CREATE TABLE Usuarios (
     FOREIGN KEY (id_setor) REFERENCES Setores(id_setor)
 );
 
+CREATE TABLE Tecnicos (
+    id_tecnico INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
+    id_setor INT NOT NULL,
+    email_tecnico VARCHAR(50) NOT NULL,
+    telefone_tecnico VARCHAR(20) NOT NULL,
+    data_nasc_tecnico DATE,
+    cargo_tecnico VARCHAR(50) NOT NULL,
+    nivel_experiencia ENUM('Junior', 'Pleno', 'Senior', 'Master') DEFAULT 'Junior',
+    disponibilidade_tecnico ENUM('Disponível', 'Em Campo', 'Férias', 'Afastado') DEFAULT 'Disponível',
+    FOREIGN KEY (id_usuario)
+        REFERENCES Usuarios (id_usuario)
+        ON DELETE CASCADE,
+    FOREIGN KEY (id_setor)
+        REFERENCES Setores (id_setor)
+);
+
 CREATE TABLE Logs_Acesso (
     id_log INT AUTO_INCREMENT PRIMARY KEY,
     id_usuario INT,
