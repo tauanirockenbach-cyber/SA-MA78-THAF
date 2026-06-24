@@ -50,7 +50,7 @@ CREATE TABLE Modelos_Maquinas (
     nome_modelo VARCHAR(100) NOT NULL,
     descricao_tecnica TEXT,
     potencia_especificacao VARCHAR(50),
-    CONSTRAINT unique_modelo_nome UNIQUE (id_modelo, nome_maquina) -- Permite a FK composta da Tabela 5
+    CONSTRAINT unique_modelo_nome UNIQUE (id_modelo, nome_maquina)
 );
 
 CREATE TABLE Maquinas_Ativos (
