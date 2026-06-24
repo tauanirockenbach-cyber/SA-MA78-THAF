@@ -119,29 +119,59 @@ INSERT INTO Matriz_Riscos_EPI (risco_nr01, epis_obrigatorios) VALUES
 ('Mecânico / Projeção de Partículas', 'Óculos de proteção, Protetor auricular, Bota de segurança'),
 ('Químico / Manuseio de Produtos', 'Luvas nitrílicas, Óculos ampla visão, Avental impermeável'),
 ('Ergonômico / Movimentação de Carga', 'Cinta ergonômica, Sapato de segurança com biqueira'),
-('Físico / Ruído e Vibração', 'Abafador de ruído tipo concha, Luvas antivibração');
+('Físico / Ruído e Vibração', 'Abafador de ruído tipo concha, Luvas antivibração')
+('Elétrico / Alta Tensão e Choque', 'Luvas isolantes de borracha, Sapato de segurança sem componentes metálicos, Protetor facial contra arco elétrico'),
+('Térmico / Altas Temperaturas', 'Luva de raspa de couro, Avental de raspa, Perneira de raspa'),
+('Radiação Não Ionizante / Soldagem', 'Máscara de solda com filtro de escurecimento automático, Blusão de raspa, Luva de vaqueta para soldador');
 
 INSERT INTO Ordens_Servico (id_os, tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_tecnico_responsavel) VALUES
 (1001, 'AJU-FR-03', 'Desnivelamento da mesa, mandril solto e folga no eixo do mandril.', '2026-06-15', '08:00:00', NULL, 'Em andamento', 2),
 (1002, 'MAN-JC-01', 'Vazamento na parte hidráulica e garfos descendo sozinhos.', '2026-06-16', '09:30:00', NULL, 'Em andamento', 3),
 (1003, 'MAN-LV-01', 'A estrutura da grade possui um furo na solda, não sai fluido e máquina não liga.', '2026-06-17', '13:00:00', '17:00:00', 'Concluído', 3),
 (1004, 'FER-LX-01', 'Lixadeira está com desalinhamento nas polias.', '2026-06-18', '07:45:00', NULL, 'Aberto', 1),
-(1005, 'CAL-JT-01', 'Quebra do fecho do engate rápido.', '2026-06-19', '10:00:00', '11:30:00', 'Concluído', 2);
+(1005, 'CAL-JT-01', 'Quebra do fecho do engate rápido.', '2026-06-19', '10:00:00', '11:30:00', 'Concluído', 2),
+(1006, 'CNC-CU-01', 'Ruído excessivo no fuso (spindle) em altas rotações.', '2026-06-20', '08:00:00', '12:00:00', 'Concluído', 1),
+(1007, 'AJU-FR-01', 'Motor superaquecendo após 15 minutos de uso contínuo.', '2026-06-20', '14:00:00', NULL, 'Em andamento', 2),
+(1008, 'CAL-MG-01', 'Alimentador de arame travando intermitentemente durante a soldagem.', '2026-06-21', '09:00:00', '11:15:00', 'Concluído', 2),
+(1009, 'MAN-GH-01', 'Gatilho de alívio da pressão hidráulica travado.', '2026-06-22', '10:30:00', NULL, 'Aberto', 3),
+(1010, 'AJU-FR-04', 'Chave liga/desliga com mau contato elétrico.', '2026-06-22', '15:45:00', NULL, 'Aberto', 2),
+(1011, 'CNC-TN-01', 'Vazamento de fluido refrigerante na base da máquina.', '2026-06-23', '08:30:00', '10:45:00', 'Concluído', 1),
+(1012, 'AJU-FR-02', 'Substituição preventiva do rolamento do eixo principal.', '2026-06-24', '07:30:00', '11:30:00', 'Concluído', 2);
 
 INSERT INTO OS_Materiais (id_os, id_peca, quantidade_utilizada) VALUES
 (1002, 16, 1), 
-(1003, 17, 1); 
+(1003, 17, 1),
+(1006, 10, 1), 
+(1007, 11, 1), 
+(1008, 17, 2),
+(1011, 4, 3),  
+(1012, 16, 1); 
 
 INSERT INTO OS_Ferramentas (id_os, id_ferramenta) VALUES
 (1001, 1),  
 (1001, 12), 
 (1002, 25), 
-(1003, 9);  
+(1003, 9),
+(1006, 3), 
+(1006, 7), 
+(1007, 21), 
+(1008, 32), 
+(1009, 25), 
+(1011, 28), 
+(1012, 1), 
+(1012, 12); 
 
 INSERT INTO OS_Seguranca (id_os, id_risco) VALUES
 (1001, 1), 
 (1002, 3), 
 (1003, 2), 
-(1004, 4);
+(1004, 4),
+(1006, 1), 
+(1007, 5),
+(1008, 7), 
+(1009, 3), 
+(1010, 5),
+(1011, 2),
+(1012, 1); 
 
 
