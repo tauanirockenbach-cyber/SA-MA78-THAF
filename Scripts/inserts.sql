@@ -10,7 +10,7 @@ INSERT INTO Usuarios (nome_usuario, email_usuario, senha_hash, perfil_usuario, s
 ('Tauani', 'tauani@empresa.com', 'hash_senha_1', 'CEO', 'Ativo', 1),
 ('FelipeM', 'felipem@empresa.com', 'hash_senha_2', 'Diretor', 'Ativo', 2),
 ('Henrique', 'henrique@empresa.com', 'hash_senha_3', 'Gerente', 'Ativo', 5),
-('Ana', 'ana@empresa.com', 'hash_senha_4', 'Tecnico', 'Coordenador', 6),
+('Ana', 'ana@empresa.com', 'hash_senha_4', 'Coordenador', 'Ativo', 6),
 -- Laboratório CNC (Setor 1)
 ('Carlos Silva', 'carlos.cnc@empresa.com', 'hash_tec_6', 'Supervisor', 'Ativo', 1),
 ('Marcos Souza', 'marcos.cnc@empresa.com', 'hash_tec_7', 'Tecnico', 'Ativo', 1),
