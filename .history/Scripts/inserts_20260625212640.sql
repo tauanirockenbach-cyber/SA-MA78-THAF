@@ -63,7 +63,7 @@ INSERT INTO Usuarios (nome_usuario, email_usuario, senha_hash, perfil_usuario, s
 ('Arthur Vinicius', 'arthur.man@empresa.com', 'hash_tec_46', 'Tecnico', 'Ativo', 5),
 ('Caio Cesar', 'caio.man@empresa.com', 'hash_tec_47', 'Tecnico', 'Ativo', 5),
 ('Douglas Pinheiro', 'douglas.man@empresa.com', 'hash_tec_48', 'Tecnico', 'Inativo', 5),
-('Erick Andrade', 'erick.man@empresa.com', 'hash_tec_49', 'Supervisor', 'Ativo', 5),
+('Erick Andrade', 'erick.man@empresa.com', 'hash_tec_49', 'Tecnico', 'Ativo', 5),
 ('Guilherme Augusto', 'guilherme.man@empresa.com', 'hash_tec_50', 'Tecnico', 'Ativo', 5),
 ('Hudson Carvalho', 'hudson.man@empresa.com', 'hash_tec_51', 'Tecnico', 'Inativo', 5),
 ('Jean Carlos', 'jean.man@empresa.com', 'hash_tec_52', 'Tecnico', 'Ativo', 5),
