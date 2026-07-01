@@ -31,7 +31,7 @@ CREATE TABLE Tecnicos (
 );
 
 CREATE TABLE Logs_Acesso (
-    id_log BIGINT AUTO_INCREMENT PRIMARY KEY, -- Alterado para BIGINT prevendo volumetria alta de logs
+    id_log BIGINT AUTO_INCREMENT PRIMARY KEY,
     id_usuario INT,
     data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     acao_acesso VARCHAR(100) NOT NULL,
