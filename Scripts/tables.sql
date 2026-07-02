@@ -3,35 +3,47 @@ CREATE TABLE Setores (
     nome_setor VARCHAR(50) NOT NULL UNIQUE,
     descricao_setor VARCHAR(150)
 );
-
 CREATE TABLE Usuarios (
     id_usuario INT AUTO_INCREMENT PRIMARY KEY,
     nome_usuario VARCHAR(100) NOT NULL,
     email_usuario VARCHAR(100) NOT NULL UNIQUE,
     senha_hash VARCHAR(255) NOT NULL,
-    perfil_usuario ENUM('Administrador', 'Sistema', 'Tecnico', 'Entregador', 'CEO', 'Diretor', 'Gerente', 'Coordenador', 'Supervisor') NOT NULL,
+    cargo_usuario ENUM('Administrador', 'Sistema', 'Tecnico', 'Entregador', 'CEO', 'Diretor', 'Gerente', 'Coordenador', 'Supervisor') NOT NULL,
     status_usuario ENUM('Ativo', 'Inativo') NOT NULL DEFAULT 'Ativo',
+    telefone_usuario VARCHAR(20) NOT NULL UNIQUE,
+    data_nasc_usuario DATE,
     id_setor INT,
     data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (id_setor) REFERENCES Setores(id_setor) ON DELETE SET NULL
+    FOREIGN KEY (id_setor)
+        REFERENCES Setores (id_setor)
+        ON DELETE SET NULL
 );
 
 CREATE TABLE Tecnicos (
     id_tecnico INT AUTO_INCREMENT PRIMARY KEY,
     id_usuario INT NOT NULL UNIQUE,
-    id_setor INT NOT NULL,
-    email_tecnico VARCHAR(50) NOT NULL UNIQUE,
-    telefone_tecnico VARCHAR(20) NOT NULL,
-    data_nasc_tecnico DATE,
+    email_usuario VARCHAR(100) NOT NULL UNIQUE,
+    telefone_usuario VARCHAR(20) NOT NULL UNIQUE,
+    id_setor INT,
     cargo_tecnico VARCHAR(50) NOT NULL,
     nivel_experiencia ENUM('Junior', 'Pleno', 'Senior', 'Master') DEFAULT 'Junior',
     disponibilidade_tecnico ENUM('Disponível', 'Em Campo', 'Férias', 'Afastado') DEFAULT 'Disponível',
-    FOREIGN KEY (id_usuario) REFERENCES Usuarios(id_usuario) ON DELETE CASCADE,
-    FOREIGN KEY (id_setor) REFERENCES Setores(id_setor) ON DELETE RESTRICT
+    FOREIGN KEY (id_setor)
+        REFERENCES Setores (id_setor)
+        ON DELETE SET NULL,
+    FOREIGN KEY (id_usuario)
+        REFERENCES Usuarios (id_usuario)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (email_usuario)
+        REFERENCES Usuarios (email_usuario)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (telefone_usuario)
+        REFERENCES Usuarios (telefone_usuario)
+        ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE Logs_Acesso (
-    id_log BIGINT AUTO_INCREMENT PRIMARY KEY, -- Alterado para BIGINT prevendo volumetria alta de logs
+    id_log BIGINT AUTO_INCREMENT PRIMARY KEY,
     id_usuario INT,
     data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     acao_acesso VARCHAR(100) NOT NULL,
@@ -40,21 +52,18 @@ CREATE TABLE Logs_Acesso (
     FOREIGN KEY (id_usuario) REFERENCES Usuarios(id_usuario) ON DELETE SET NULL
 );
 
-
 CREATE TABLE Modelos_Maquinas (
-    id_modelo INT AUTO_INCREMENT PRIMARY KEY,
-    nome_maquina VARCHAR(50) NOT NULL,
-    fabricante_maquina VARCHAR(50) NOT NULL,
-    nome_modelo VARCHAR(100) NOT NULL,
+    id_maquina INT AUTO_INCREMENT PRIMARY KEY,
+    nome_maquina VARCHAR(50) NOT NULL,       
+    fabricante_maquina VARCHAR(50) NOT NULL,  
+    nome_modelo VARCHAR(100) NOT NULL,    
     descricao_tecnica TEXT,
-    potencia_especificacao VARCHAR(50),
-    CONSTRAINT unique_modelo_nome UNIQUE (id_modelo, nome_maquina)
+    potencia_especificacao VARCHAR(50)
 );
 
-CREATE TABLE Maquinas_Ativos (
+CREATE TABLE Maquinas (
     tag_equipamento VARCHAR(20) PRIMARY KEY, 
-    id_modelo INT NOT NULL,
-    nome_maquina VARCHAR(50) NOT NULL,
+    id_maquina INT NOT NULL,               
     numero_serie VARCHAR(50) NOT NULL UNIQUE,
     localizacao_maquina VARCHAR(100) NOT NULL,       
     tipo_manutencao_padrao ENUM('Preventiva', 'Corretiva', 'Preditiva') NOT NULL,
@@ -62,9 +71,9 @@ CREATE TABLE Maquinas_Ativos (
     ultima_manutencao DATE,
     id_setor INT NOT NULL,
     FOREIGN KEY (id_setor) REFERENCES Setores(id_setor) ON DELETE RESTRICT,
-    CONSTRAINT fk_ativos_modelo_nome 
-        FOREIGN KEY (id_modelo, nome_maquina) 
-        REFERENCES Modelos_Maquinas(id_modelo, nome_maquina)
+    CONSTRAINT fk_maquinas_modelo
+        FOREIGN KEY (id_maquina) 
+        REFERENCES Modelos_Maquinas(id_maquina)
         ON UPDATE CASCADE ON DELETE RESTRICT
 );
 
@@ -90,7 +99,6 @@ CREATE TABLE Matriz_Riscos_EPI (
     epis_obrigatorios VARCHAR(255) NOT NULL
 );
 
-
 CREATE TABLE Ordens_Servico (
     id_os INT PRIMARY KEY,
     tag_equipamento VARCHAR(20) NOT NULL,
@@ -100,7 +108,7 @@ CREATE TABLE Ordens_Servico (
     hh_fim TIME, 
     status_os ENUM('Aberto', 'Em andamento', 'Concluído') DEFAULT 'Aberto',
     id_tecnico_responsavel INT,
-    FOREIGN KEY (tag_equipamento) REFERENCES Maquinas_Ativos(tag_equipamento) ON DELETE RESTRICT,
+    FOREIGN KEY (tag_equipamento) REFERENCES Maquinas(tag_equipamento) ON DELETE RESTRICT,
     FOREIGN KEY (id_tecnico_responsavel) REFERENCES Tecnicos(id_tecnico) ON DELETE SET NULL,
     CONSTRAINT chk_horario_os CHECK (hh_fim IS NULL OR hh_fim >= hh_inicio)
 );
