@@ -243,11 +243,4 @@ ORDER BY
     T.disponibilidade_tecnico ASC, 
     T.nivel_experiencia DESC;
 
--- Listar todos os setores cadastrados
-SELECT 
-    id_setor,
-    nome_setor,
-    descricao_setor
-FROM Setores
-ORDER BY nome_setor ASC;
 >>>>>>> 37c446b867478ed710bf35bbf82ac7d6667e6c5d
