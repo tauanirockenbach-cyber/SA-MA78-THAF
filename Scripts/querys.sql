@@ -205,3 +205,11 @@ LEFT JOIN Setores AS S ON T.id_setor = S.id_setor
 ORDER BY 
     T.disponibilidade_tecnico ASC, 
     T.nivel_experiencia DESC;
+
+-- Listar todos os setores cadastrados
+SELECT 
+    id_setor,
+    nome_setor,
+    descricao_setor
+FROM Setores
+ORDER BY nome_setor ASC;
