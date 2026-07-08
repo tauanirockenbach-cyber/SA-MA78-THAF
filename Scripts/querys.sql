@@ -167,6 +167,7 @@ GROUP BY
     MM.potencia_especificacao
 ORDER BY total_de_quebras_registradas DESC;
 
+<<<<<<< HEAD
 -- Indicador de tempo médio de reparo por técnico
 select U.nome_usuario, 
     sec_to_time(avg(time_to_sec(timediff(OS.hh_fim, OS.hh_inicio)))) as tempo_medio_trabalho 
@@ -202,3 +203,51 @@ from Usuarios as U
 join Tecnicos as T on T.id_usuario = U.id_usuario
 where cargo_usuario = 'Tecnico'
 group by T.disponibilidade_tecnico;
+=======
+
+-- Quais ferramentas foram alocadas/utilizadas em cada Ordem de Serviço?
+SELECT 
+    OSF.id_os,
+    OS.descricao_falha,
+    AF.nome_ferramenta
+FROM OS_Ferramentas AS OSF
+JOIN Ordens_Servico AS OS ON OS.id_os = OSF.id_os
+JOIN Almoxarifado_Ferramentas AS AF ON AF.id_ferramenta = OSF.id_ferramenta
+ORDER BY OSF.id_os ASC;
+
+-- Quais ferramentas estão atualmente 'Em Uso' e qual o prazo limite para devolução?
+SELECT 
+    MF.id_movimentacao,
+    AF.nome_ferramenta,
+    U.nome_usuario AS tecnico_solicitante,
+    MF.data_retirada,
+    MF.data_devolucao_prevista
+FROM Movimentacao_Ferramentas AS MF
+JOIN Almoxarifado_Ferramentas AS AF ON MF.id_ferramenta = AF.id_ferramenta
+JOIN Tecnicos AS T ON MF.id_tecnico_solicitante = T.id_tecnico
+JOIN Usuarios AS U ON T.id_usuario = U.id_usuario
+WHERE MF.status_movimentacao = 'Em Uso'
+ORDER BY MF.data_devolucao_prevista ASC;
+
+-- Qual é o perfil dos técnicos (nível, cargo, setor) e quem está disponível para chamados?
+SELECT 
+    U.nome_usuario,
+    T.cargo_tecnico,
+    T.nivel_experiencia,
+    S.nome_setor,
+    T.disponibilidade_tecnico
+FROM Tecnicos AS T
+JOIN Usuarios AS U ON T.id_usuario = U.id_usuario
+LEFT JOIN Setores AS S ON T.id_setor = S.id_setor
+ORDER BY 
+    T.disponibilidade_tecnico ASC, 
+    T.nivel_experiencia DESC;
+
+-- Listar todos os setores cadastrados
+SELECT 
+    id_setor,
+    nome_setor,
+    descricao_setor
+FROM Setores
+ORDER BY nome_setor ASC;
+>>>>>>> 37c446b867478ed710bf35bbf82ac7d6667e6c5d
