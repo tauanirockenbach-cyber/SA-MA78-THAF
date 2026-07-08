@@ -166,3 +166,39 @@ GROUP BY
     MM.nome_modelo,
     MM.potencia_especificacao
 ORDER BY total_de_quebras_registradas DESC;
+
+-- Indicador de tempo médio de reparo por técnico
+select U.nome_usuario, 
+    sec_to_time(avg(time_to_sec(timediff(OS.hh_fim, OS.hh_inicio)))) as tempo_medio_trabalho 
+from Usuarios as U
+join Tecnicos as T on T.id_usuario = U.id_usuario
+join Ordens_Servico as OS on OS.id_tecnico_responsavel = T.id_tecnico
+where status_os = 'Concluído'
+    and OS.hh_fim is not null
+group by U.nome_usuario;
+
+-- Componentes mais utilizados pela fábrica
+select nome_peca, sum(OM.id_peca) as quantidade_pecas_usadas, S.nome_setor as setor_mais_usado 
+from OS_Materiais as OM 
+join Almoxarifado_Pecas as AP on OM.id_peca = AP.id_peca
+join Ordens_Servico as OS on OM.id_os = OS.id_os
+join Maquinas as M on M.tag_equipamento = OS.tag_equipamento
+join Setores as S on M.id_setor = S.id_setor
+group by S.nome_setor, nome_peca
+order by quantidade_pecas_usadas desc;
+
+-- Máquina que quebrou mais nos últimos 5 anos
+select MM.nome_maquina, M.tag_equipamento, count(OS.id_os) as quantidade_falhas
+from Maquinas as M
+join Modelos_Maquinas as MM on M.id_maquina = MM.id_maquina
+join Ordens_Servico as OS on OS.tag_equipamento = M.tag_equipamento
+where data_abertura >= date_sub(now(), interval 5 year)
+group by tag_equipamento
+order by quantidade_falhas desc;
+
+-- Painel de Status: Onde está cada pessoa (Técnicos)?
+select T.disponibilidade_tecnico, count(U.id_usuario) as quantidade_tecnicos
+from Usuarios as U
+join Tecnicos as T on T.id_usuario = U.id_usuario
+where cargo_usuario = 'Tecnico'
+group by T.disponibilidade_tecnico;
