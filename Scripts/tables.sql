@@ -156,18 +156,3 @@ CREATE TABLE Movimentacao_Ferramentas (
     FOREIGN KEY (id_almoxarife_entregador) REFERENCES Usuarios(id_usuario) ON DELETE SET NULL,
     CONSTRAINT chk_datas_movimentacao CHECK (data_devolucao_real IS NULL OR data_devolucao_real >= data_retirada)
 );
-
--- Cadastra um novo setor.
-INSERT INTO Setores (nome_setor, descricao_setor)
-VALUES ('Produção', 'Responsável pelo processo produtivo');
-
--- Atualiza o nome e a descrição de um setor.
-UPDATE Setores
-SET
-    nome_setor = 'Produção Industrial',
-    descricao_setor = 'Responsável pela produção industrial'
-WHERE id_setor = 1;
-
--- Exclui um setor pelo ID.
-DELETE FROM Setores
-WHERE id_setor = 1;
