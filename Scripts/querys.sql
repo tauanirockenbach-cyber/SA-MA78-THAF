@@ -205,7 +205,7 @@ where cargo_usuario = 'Tecnico'
 group by T.disponibilidade_tecnico;
 =======
 
--- Quais ferramentas foram alocadas/utilizadas em cada Ordem de Serviço?
+-- ferramentas foram alocadas/utilizadas em cada Ordem de Serviço?
 SELECT 
     OSF.id_os,
     OS.descricao_falha,
@@ -215,7 +215,7 @@ JOIN Ordens_Servico AS OS ON OS.id_os = OSF.id_os
 JOIN Almoxarifado_Ferramentas AS AF ON AF.id_ferramenta = OSF.id_ferramenta
 ORDER BY OSF.id_os ASC;
 
--- Quais ferramentas estão atualmente 'Em Uso' e qual o prazo limite para devolução?
+-- ferramentas 'Em Uso' e prazo limite para devolução
 SELECT 
     MF.id_movimentacao,
     AF.nome_ferramenta,
@@ -229,7 +229,7 @@ JOIN Usuarios AS U ON T.id_usuario = U.id_usuario
 WHERE MF.status_movimentacao = 'Em Uso'
 ORDER BY MF.data_devolucao_prevista ASC;
 
--- Qual é o perfil dos técnicos (nível, cargo, setor) e quem está disponível para chamados?
+-- perfil dos técnicos (nível, cargo, setor) e disponibilidade para chamados
 SELECT 
     U.nome_usuario,
     T.cargo_tecnico,
