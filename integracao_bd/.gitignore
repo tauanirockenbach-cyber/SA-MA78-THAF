@@ -1,0 +1,4 @@
+# Arquivo que instrui o Git sobre quais arquivos locais e pastas privadas (como o .env e a .venv) ele deve ignorar e não enviar para o repositório.
+
+integracao_bd/.env
+integracao_bd/.venv

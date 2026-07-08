@@ -1,0 +1,1 @@
+# Arquivo principal responsável por exibir o menu interativo e controlar o fluxo do sistema.
