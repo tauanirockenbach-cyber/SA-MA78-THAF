@@ -1,3 +1,5 @@
+-- SQLBook: Code
+
 CREATE TABLE Setores (
     id_setor INT AUTO_INCREMENT PRIMARY KEY,
     nome_setor VARCHAR(50) NOT NULL UNIQUE,
@@ -7,7 +9,7 @@ CREATE TABLE Usuarios (
     id_usuario INT AUTO_INCREMENT PRIMARY KEY,
     nome_usuario VARCHAR(100) NOT NULL,
     email_usuario VARCHAR(100) NOT NULL UNIQUE,
-    senha_hash VARCHAR(255) NOT NULL,
+    senha VARCHAR(255) NOT NULL,
     cargo_usuario ENUM('Administrador', 'Sistema', 'Tecnico', 'Entregador', 'CEO', 'Diretor', 'Gerente', 'Coordenador', 'Supervisor') NOT NULL,
     status_usuario ENUM('Ativo', 'Inativo') NOT NULL DEFAULT 'Ativo',
     telefone_usuario VARCHAR(20) NOT NULL UNIQUE,
@@ -41,6 +43,7 @@ CREATE TABLE Tecnicos (
         REFERENCES Usuarios (telefone_usuario)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
+
 
 CREATE TABLE Logs_Acesso (
     id_log BIGINT AUTO_INCREMENT PRIMARY KEY,
