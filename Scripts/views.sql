@@ -176,8 +176,8 @@ where status_os = 'Concluído'
     and OS.hh_fim is not null
 group by U.nome_usuario;
 
-CREATE VIEW pecas_mais_usadas_fabrica AS
-select nome_peca, sum(OM.id_peca) as quantidade_pecas_usadas, S.nome_setor as setor_mais_usado 
+CREATE OR REPLACE VIEW pecas_mais_usadas_fabrica AS
+select nome_peca, sum(OM.quantidade_utilizada) as quantidade_pecas_usadas, S.nome_setor as setor_mais_usado
 from OS_Materiais as OM 
 join Almoxarifado_Pecas as AP on OM.id_peca = AP.id_peca
 join Ordens_Servico as OS on OM.id_os = OS.id_os
