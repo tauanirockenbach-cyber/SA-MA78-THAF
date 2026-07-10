@@ -1,5 +1,5 @@
-# Módulo de infraestrutura responsável por carregar as variáveis de ambiente e gerenciar a conexão com o banco de dados.
-#biblioteca = mysql-connector-python
+# Módulo de infraestrutura: Conexão com o Banco de Dados
+# Instalar no terminal: pip install mysql-connector-python python-dotenv
 
 import os
 import mysql.connector
@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def conectar():
-    conexao=mysql.connector.connect(
+    conexao = mysql.connector.connect(
         host=os.getenv("DB_HOST"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
@@ -26,8 +26,8 @@ if __name__ == "__main__":
         
         if conexao.is_connected():
             print("Conexão realizada com sucesso!")
-            conexao.close() # Fecha a conexão após o teste
+            conexao.close()  # Fecha a conexão após o teste
             print("Conexão fechada com segurança.")
             
     except Exception as erro:
-        print(f" Erro ao conectar: {erro}")
+        print(f"Erro ao conectar: {erro}")

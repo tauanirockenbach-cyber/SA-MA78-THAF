@@ -1,38 +1,35 @@
--- Criar os utilizadores corretamente com '%' (permitindo o acesso a partir do seu IP)
-CREATE USER 'tauani'@'%' IDENTIFIED BY 'tauani123';
-CREATE USER 'felipe'@'%' IDENTIFIED BY 'felipe123';
-CREATE USER 'ana'@'%' IDENTIFIED BY 'ana123';
-CREATE USER 'henrique'@'%' IDENTIFIED BY 'henrique123';
+-- 1. Criação dos usuários com permissão de acesso externo
+CREATE USER 'tauani'@'%' IDENTIFIED BY 'tauani123'; 
+CREATE USER 'felipe'@'%' IDENTIFIED BY 'felipe123'; 
+CREATE USER 'ana'@'%' IDENTIFIED BY 'ana123'; 
+CREATE USER 'henrique'@'%' IDENTIFIED BY 'henrique123'; 
 
--- Criação das Roles
-CREATE ROLE 'role_admin_manutencao',
-'role_supervisor_manutencao', 
-'role_tecnico_manutencao', 
-'role_auditor_manutencao';
+-- 2. Criação das Roles 
+CREATE ROLE 'role_admin_manutencao', 
+            'role_supervisor_manutencao', 
+            'role_tecnico_manutencao', 
+            'role_auditor_manutencao'; 
 
--- Privilégio total
-GRANT ALL PRIVILEGES ON Manutencao.* TO 'role_admin_manutencao';
+-- 3. Atribuição de privilégios para cada Role no banco 'Manutencao'
+GRANT ALL PRIVILEGES ON Manutencao.* TO 'role_admin_manutencao'; 
+GRANT SELECT, INSERT, UPDATE, DELETE ON Manutencao.* TO 'role_supervisor_manutencao'; 
+GRANT SELECT, INSERT ON Manutencao.* TO 'role_tecnico_manutencao'; 
+GRANT SELECT ON Manutencao.* TO 'role_auditor_manutencao'; 
 
--- Privilégios de CRUD padrão
-GRANT SELECT, INSERT, UPDATE, DELETE ON Manutencao.* TO 'role_supervisor_manutencao';
+-- 4. Vinculação das Roles aos respectivos usuários
+GRANT 'role_admin_manutencao' TO 'tauani'@'%'; 
+GRANT 'role_supervisor_manutencao' TO 'felipe'@'%'; 
+GRANT 'role_tecnico_manutencao' TO 'ana'@'%'; 
+GRANT 'role_auditor_manutencao' TO 'henrique'@'%'; 
 
--- Privilégios de leitura e inserção (criação de registros)
-GRANT SELECT, INSERT ON Manutencao.* TO 'role_tecnico_manutencao';
+-- 5. Definição das Roles padrão (obrigatório para ativar ao logar)
+SET DEFAULT ROLE 'role_admin_manutencao' TO 'tauani'@'%'; 
+SET DEFAULT ROLE 'role_supervisor_manutencao' TO 'felipe'@'%'; 
+SET DEFAULT ROLE 'role_tecnico_manutencao' TO 'ana'@'%'; 
+SET DEFAULT ROLE 'role_auditor_manutencao' TO 'henrique'@'%'; 
 
--- Privilégio apenas de leitura
-GRANT SELECT ON Manutencao.* TO 'role_auditor_manutencao';
+-- 6. Configuração do servidor para ativar automaticamente as Roles no login
+SET GLOBAL activate_all_roles_on_login = ON;
 
-GRANT 'role_admin_manutencao' TO 'tauani'@'%';
-GRANT 'role_supervisor_manutencao' TO 'felipe'@'%';
-GRANT 'role_tecnico_manutencao' TO 'ana'@'%';
-GRANT 'role_auditor_manutencao' TO 'henrique'@'%';
-
-SET DEFAULT ROLE 'role_admin_manutencao' TO 'tauani'@'%';
-SET DEFAULT ROLE 'role_supervisor_manutencao' TO 'felipe'@'%';
-SET DEFAULT ROLE 'role_tecnico_manutencao' TO 'ana'@'%';
-SET DEFAULT ROLE 'role_auditor_manutencao' TO 'henrique'@'%';
-
--- Aplicar todas as alterações
-FLUSH PRIVILEGES;
-
--- SELECT * FROM mysql.user;
+-- 7. Atualização da tabela de permissões na memória
+FLUSH PRIVILEGES; 
