@@ -12,6 +12,8 @@ CREATE TABLE Usuarios (
     senha VARCHAR(255) NOT NULL,
     cargo_usuario ENUM('Administrador', 'Sistema', 'Tecnico', 'Entregador', 'CEO', 'Diretor', 'Gerente', 'Coordenador', 'Supervisor') NOT NULL,
     status_usuario ENUM('Ativo', 'Inativo') NOT NULL DEFAULT 'Ativo',
+    nivel_experiencia ENUM('Junior', 'Pleno', 'Senior', 'Master') DEFAULT 'Junior',
+    disponibilidade_tecnico ENUM('Disponível', 'Em Campo', 'Férias', 'Afastado') DEFAULT 'Disponível',
     telefone_usuario VARCHAR(20) NOT NULL UNIQUE,
     data_nasc_usuario DATE,
     id_setor INT,
@@ -19,29 +21,6 @@ CREATE TABLE Usuarios (
     FOREIGN KEY (id_setor)
         REFERENCES Setores (id_setor)
         ON DELETE SET NULL
-);
-
-CREATE TABLE Tecnicos (
-    id_tecnico INT AUTO_INCREMENT PRIMARY KEY,
-    id_usuario INT NOT NULL UNIQUE,
-    email_usuario VARCHAR(100) NOT NULL UNIQUE,
-    telefone_usuario VARCHAR(20) NOT NULL UNIQUE,
-    id_setor INT,
-    cargo_tecnico VARCHAR(50) NOT NULL,
-    nivel_experiencia ENUM('Junior', 'Pleno', 'Senior', 'Master') DEFAULT 'Junior',
-    disponibilidade_tecnico ENUM('Disponível', 'Em Campo', 'Férias', 'Afastado') DEFAULT 'Disponível',
-    FOREIGN KEY (id_setor)
-        REFERENCES Setores (id_setor)
-        ON DELETE SET NULL,
-    FOREIGN KEY (id_usuario)
-        REFERENCES Usuarios (id_usuario)
-        ON DELETE CASCADE ON UPDATE CASCADE,
-    FOREIGN KEY (email_usuario)
-        REFERENCES Usuarios (email_usuario)
-        ON DELETE CASCADE ON UPDATE CASCADE,
-    FOREIGN KEY (telefone_usuario)
-        REFERENCES Usuarios (telefone_usuario)
-        ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 
@@ -105,16 +84,18 @@ CREATE TABLE Matriz_Riscos_EPI (
 CREATE TABLE Ordens_Servico (
     id_os INT PRIMARY KEY,
     tag_equipamento VARCHAR(20) NOT NULL,
-    descricao_falha TEXT NOT NULL, 
-    data_abertura DATE NOT NULL, 
+    descricao_falha TEXT NOT NULL,
+    data_abertura DATE NOT NULL,
     hh_inicio TIME NOT NULL,
-    hh_fim TIME, 
+    hh_fim TIME,
     status_os ENUM('Aberto', 'Em andamento', 'Concluído') DEFAULT 'Aberto',
-    id_tecnico_responsavel INT,
+    id_usuario INT,
     FOREIGN KEY (tag_equipamento) REFERENCES Maquinas(tag_equipamento) ON DELETE RESTRICT,
-    FOREIGN KEY (id_tecnico_responsavel) REFERENCES Tecnicos(id_tecnico) ON DELETE SET NULL,
+    FOREIGN KEY (id_usuario) REFERENCES Usuarios(id_usuario) ON DELETE SET NULL,
+    
     CONSTRAINT chk_horario_os CHECK (hh_fim IS NULL OR hh_fim >= hh_inicio)
 );
+
 
 CREATE TABLE OS_Materiais (
     id_os_material INT AUTO_INCREMENT PRIMARY KEY,
@@ -146,8 +127,8 @@ CREATE TABLE Movimentacao_Ferramentas (
     id_movimentacao INT AUTO_INCREMENT PRIMARY KEY,
     id_ferramenta INT NOT NULL,
     id_os INT,
-    id_tecnico_solicitante INT NOT NULL, -- Corrigido para apontar para Técnicos (regra operacional)
-    id_almoxarife_entregador INT,       -- Corrigido de "Usuario geral" para a função clara no nome do campo
+    id_tecnico_solicitante INT NOT NULL,
+    id_almoxarife_entregador INT,       
     data_retirada TIMESTAMP NULL DEFAULT NULL, 
     data_devolucao_prevista DATETIME NOT NULL,
     data_devolucao_real TIMESTAMP NULL,
@@ -155,7 +136,7 @@ CREATE TABLE Movimentacao_Ferramentas (
     observacoes TEXT,
     FOREIGN KEY (id_ferramenta) REFERENCES Almoxarifado_Ferramentas(id_ferramenta) ON DELETE RESTRICT,
     FOREIGN KEY (id_os) REFERENCES Ordens_Servico(id_os) ON DELETE SET NULL,
-    FOREIGN KEY (id_tecnico_solicitante) REFERENCES Tecnicos(id_tecnico) ON DELETE RESTRICT,
+    FOREIGN KEY (id_tecnico_solicitante) REFERENCES Usuarios(id_usuario) ON DELETE RESTRICT,
     FOREIGN KEY (id_almoxarife_entregador) REFERENCES Usuarios(id_usuario) ON DELETE SET NULL,
     CONSTRAINT chk_datas_movimentacao CHECK (data_devolucao_real IS NULL OR data_devolucao_real >= data_retirada)
 );
