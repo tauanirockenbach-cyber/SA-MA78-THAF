@@ -1,5 +1,3 @@
--- SQLBook: Code
-
 CREATE TABLE Setores (
     id_setor INT AUTO_INCREMENT PRIMARY KEY,
     nome_setor VARCHAR(50) NOT NULL UNIQUE,
@@ -123,20 +121,19 @@ CREATE TABLE OS_Seguranca (
     FOREIGN KEY (id_risco) REFERENCES Matriz_Riscos_EPI(id_risco) ON DELETE RESTRICT
 );
 
-CREATE TABLE Movimentacao_Ferramentas (
+CREATE TABLE Movimentacao_Ferramentas(
     id_movimentacao INT AUTO_INCREMENT PRIMARY KEY,
-    id_ferramenta INT NOT NULL,
-    id_os INT,
-    id_tecnico_solicitante INT NOT NULL,
-    id_almoxarife_entregador INT,       
-    data_retirada TIMESTAMP NULL DEFAULT NULL, 
+    id_os_ferramenta INT NOT NULL,
+    id_os INT NOT NULL,
+    id_usuario_solicitante INT NOT NULL,
+    id_usuario_entregador INT,
+    data_retirada DATETIME,
     data_devolucao_prevista DATETIME NOT NULL,
-    data_devolucao_real TIMESTAMP NULL,
-    status_movimentacao ENUM('Solicitado', 'Em Uso', 'Devolvido', 'Atrasado', 'Extraviado') DEFAULT 'Solicitado',
+    data_devolucao_real DATETIME,
+    status_movimentacao ENUM('Solicitado','Em Uso','Atrasado','Devolvido') NOT NULL,
     observacoes TEXT,
-    FOREIGN KEY (id_ferramenta) REFERENCES Almoxarifado_Ferramentas(id_ferramenta) ON DELETE RESTRICT,
-    FOREIGN KEY (id_os) REFERENCES Ordens_Servico(id_os) ON DELETE SET NULL,
-    FOREIGN KEY (id_tecnico_solicitante) REFERENCES Usuarios(id_usuario) ON DELETE RESTRICT,
-    FOREIGN KEY (id_almoxarife_entregador) REFERENCES Usuarios(id_usuario) ON DELETE SET NULL,
-    CONSTRAINT chk_datas_movimentacao CHECK (data_devolucao_real IS NULL OR data_devolucao_real >= data_retirada)
+    FOREIGN KEY(id_os_ferramenta) REFERENCES OS_Ferramentas(id_os_ferramenta),
+    FOREIGN KEY(id_os) REFERENCES Ordens_Servico(id_os),
+    FOREIGN KEY(id_usuario_solicitante) REFERENCES Usuarios(id_usuario),
+    FOREIGN KEY(id_usuario_entregador) REFERENCES Usuarios(id_usuario)
 );
