@@ -1,143 +1,306 @@
+import hashlib
+import pymysql
 import streamlit as st
-import pandas as pd
-# import database  # Descomente isso quando for integrar com seu arquivo database.py
 
-# ==========================================
-# 1. CONFIGURAÇÃO DA PÁGINA E CORES (AZUL)
-# ==========================================
-st.set_page_config(page_title="Sistema Industrial", page_icon="⚙️", layout="wide")
+st.set_page_config(
+    page_title="THAF Manutenção - Login",
+    page_icon="🔧",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-# CSS customizado para forçar os vários tons de azul
+# ------------------------------------------------------------------
+# Conexão com o banco (credenciais em .streamlit/secrets.toml)
+# ------------------------------------------------------------------
+DB_CONF = st.secrets["mysql"]
+
+# Usados apenas para preencher os campos dos botões de acesso rápido
+# (demonstração). O login em si sempre consulta a tabela Usuarios já
+# existente no banco — nada é criado por aqui.
+SEED_USERS = [
+    ("tauani@thaf.com", "tauani123", "role_admin_manutencao", "Administrador", "ALL PRIVILEGES"),
+    ("felipe@thaf.com", "felipe123", "role_supervisor_manutencao", "Supervisor", "SELECT, INSERT, UPDATE, DELETE"),
+    ("ana@thaf.com", "ana123", "role_tecnico_manutencao", "Técnico", "SELECT, INSERT"),
+    ("henrique@thaf.com", "henrique123", "role_auditor_manutencao", "Auditor", "SELECT"),
+]
+
+
+def hash_senha(senha: str) -> str:
+    return hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+
+def get_connection():
+    """Abre uma conexão nova com o MySQL do Aiven (SSL habilitado)."""
+    return pymysql.connect(
+        host=DB_CONF["manutencao-thaf-samanutencao.b.aivencloud.com"],
+        port=int(DB_CONF["16536"]),
+        user=DB_CONF["avnadmin"],
+        password=DB_CONF["AVNS_VAzsRDlCXqhGODkru0i"],
+        database=DB_CONF["Manutencao"],
+        ssl={"ssl": {}},  # Aiven exige conexão criptografada
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+
+def get_client_ip() -> str:
+    """Tenta obter o IP de origem da requisição (best effort)."""
+    try:
+        ip = getattr(st.context, "ip_address", None)
+        if ip:
+            return ip
+        headers = getattr(st.context, "headers", {}) or {}
+        forwarded = headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    except Exception:
+        pass
+    return "desconhecido"
+
+
+def log_acesso(id_usuario, acao: str, sucesso: bool):
+    """Registra a tentativa de acesso em Logs_Acesso."""
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO Logs_Acesso (id_usuario, data_hora, acao_acesso, ip_origem, sucesso_acesso) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (id_usuario, acao, get_client_ip(), sucesso),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        # Não deixa uma falha de log derrubar o fluxo de login
+        pass
+
+
+def autenticar(email: str, senha: str):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM Usuarios WHERE email_usuario = %s", (email.strip().lower(),))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if row and row["senha_hash"] == hash_senha(senha):
+        log_acesso(row["id_usuario"], "LOGIN", True)
+        return row
+
+    log_acesso(row["id_usuario"] if row else None, "LOGIN", False)
+    return None
+
+
+def buscar_ultimos_acessos(limit: int = 5):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT l.data_hora, COALESCE(u.email, '(usuário removido)') AS email,
+                       l.acao_acesso, l.ip_origem, l.sucesso_acesso
+                FROM Logs_Acesso l
+                LEFT JOIN Usuarios u ON u.id_usuario = l.id_usuario
+                ORDER BY l.data_hora DESC
+                LIMIT %s
+            """, (limit,))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# Estado da sessão
+# ------------------------------------------------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "email_input" not in st.session_state:
+    st.session_state.email_input = ""
+if "senha_input" not in st.session_state:
+    st.session_state.senha_input = ""
+if "user_data" not in st.session_state:
+    st.session_state.user_data = None
+if "db_error" not in st.session_state:
+    st.session_state.db_error = None
+def fill_demo(email):
+    st.session_state.email_input = email
+    for e, s, *_ in SEED_USERS:
+        if e == email:
+            st.session_state.senha_input = s
+
+
+def quick_login(email):
+    """Callback usado pelos botões de demonstração (roda antes do rerun,
+    então pode alterar email_input/senha_input sem erro do Streamlit)."""
+    fill_demo(email)
+    do_login()
+
+
+def do_login():
+    try:
+        row = autenticar(st.session_state.email_input, st.session_state.senha_input)
+        if row:
+            st.session_state.logged_in = True
+            st.session_state.user_data = row
+            st.session_state.login_error = False
+        else:
+            st.session_state.login_error = True
+    except Exception as e:
+        st.session_state.db_error = str(e)
+
+
+# ------------------------------------------------------------------
+# CSS — painel azul + painel branco, no estilo do mock
+# ------------------------------------------------------------------
 st.markdown("""
-    <style>
-    /* Fundo da tela - Azul bem claro (AliceBlue) */
-    .stApp { background-color: #F0F8FF; }
-    
-    /* Textos e Títulos - Azul Marinho */
-    h1, h2, h3, p, label { color: #003366 !important; }
-    
-    /* Botões - Azul Padrão */
-    .stButton>button {
-        background-color: #005A9C; 
-        color: white; 
-        border: none;
-        border-radius: 8px;
-        width: 100%;
-    }
-    /* Botões quando o mouse passa por cima - Azul Escuro */
-    .stButton>button:hover { background-color: #003366; color: white; }
-    
-    /* Sidebar (Menu Lateral) - Azul Metálico */
-    [data-testid="stSidebar"] { background-color: #B0C4DE; }
-    </style>
+<style>
+#MainMenu, header, footer {visibility: hidden;}
+.block-container {padding: 0 !important; max-width: 100% !important;}
+.stApp {background: #ffffff;}
+.blue-panel {
+    background: linear-gradient(160deg, #1e3a8a 0%, #2563eb 55%, #3b82f6 100%);
+    background-image: radial-gradient(circle, rgba(255,255,255,0.12) 1px, transparent 1px),
+        linear-gradient(160deg, #1e3a8a 0%, #2563eb 55%, #3b82f6 100%);
+    background-size: 22px 22px, cover;
+    border-radius: 18px; padding: 48px 40px; height: 820px; color: white;
+    display: flex; flex-direction: column; justify-content: space-between;
+}
+.brand-box {display: flex; align-items: center; gap: 12px;}
+.brand-icon {background: rgba(255,255,255,0.18); border-radius: 12px; width: 46px; height: 46px;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;}
+.brand-title {font-weight: 800; font-size: 18px; line-height: 1.1;}
+.brand-sub {font-size: 12px; opacity: 0.8;}
+.hero-title {font-size: 40px; font-weight: 800; line-height: 1.15; margin-top: 30px;}
+.hero-desc {font-size: 14px; opacity: 0.85; margin-top: 14px; max-width: 460px; line-height: 1.5;}
+.stats-row {display: flex; gap: 14px; margin-top: 34px;}
+.stat-card {background: rgba(255,255,255,0.10); border-radius: 10px; padding: 14px 18px; flex: 1;}
+.stat-num {font-size: 22px; font-weight: 800;}
+.stat-label {font-size: 11px; opacity: 0.75;}
+.maint-strip {margin-top: 28px; background: rgba(255,255,255,0.08); border: 1px dashed rgba(255,255,255,0.35);
+    border-radius: 10px; padding: 14px 16px; font-size: 12.5px; display: flex; align-items: center; gap: 10px;}
+.db-strip {margin-top: 10px; font-size: 11.5px; display: flex; align-items: center; gap: 8px; opacity: 0.85;}
+.footer-note {font-size: 11.5px; opacity: 0.75; display: flex; align-items: center; gap: 6px;}
+.white-panel {padding: 90px 60px;}
+.login-title {font-size: 30px; font-weight: 800; color: #0f172a;}
+.login-sub {color: #64748b; font-size: 14px; margin-bottom: 26px;}
+div[data-testid="stTextInput"] input {border-radius: 8px !important; border: 1px solid #cbd5e1 !important; padding: 10px 12px !important;}
+.stButton>button {width: 100%; border-radius: 8px; font-weight: 600;}
+.entrar-btn button {background: #2563eb; color: white; border: none; padding: 10px 0;}
+.entrar-btn button:hover {background: #1d4ed8; color: white;}
+.demo-label {font-size: 11.5px; letter-spacing: 0.05em; color: #64748b; margin: 22px 0 10px 0;}
+.demo-btn button {background: white; border: 1px solid #e2e8f0; text-align: left; padding: 10px 12px; color: #0f172a;}
+.demo-btn button:hover {border-color: #2563eb; color: #2563eb;}
+</style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 2. VARIÁVEIS DE SESSÃO (Para manter o Login)
-# ==========================================
-if 'logado' not in st.session_state:
-    st.session_state['logado'] = False
-if 'usuario' not in st.session_state:
-    st.session_state['usuario'] = ""
-if 'perfil' not in st.session_state:
-    st.session_state['perfil'] = ""
+# ------------------------------------------------------------------
+# LOGADO
+# ------------------------------------------------------------------
+if st.session_state.logged_in:
+    u = st.session_state.user_data
+    st.markdown(f"### ✅ Bem-vindo(a), {u['label']}!")
+    st.write(f"**E-mail:** {u['email']}")
+    st.write(f"**Role aplicada:** `{u['role']}`")
+    st.write(f"**Permissões:** {u['permissoes']}")
+    st.caption("Dados lidos em tempo real da tabela `Usuarios` no banco Manutencao (Aiven).")
 
-# ==========================================
-# 3. TELA DE LOGIN
-# ==========================================
-def tela_login():
-    st.title("Acesso ao Sistema 🔒")
-    
-    # Criando colunas para centralizar o login
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        st.subheader("Faça seu login")
-        user = st.text_input("Usuário:")
-        senha = st.text_input("Senha:", type="password")
-        
-        if st.button("Entrar"):
-            # Lógica simples de verificação (No mundo real, isso vem do Banco de Dados)
-            if user == "admin" and senha == "123":
-                st.session_state['logado'] = True
-                st.session_state['usuario'] = user
-                st.session_state['perfil'] = "Administrador"
-                st.rerun() # Recarrega a página
-                
-            elif user == "operador" and senha == "123":
-                st.session_state['logado'] = True
-                st.session_state['usuario'] = user
-                st.session_state['perfil'] = "Operador"
-                st.rerun()
-                
-            else:
-                st.error("Usuário ou senha incorretos! Tente novamente.")
+    if u["role"] in ("role_admin_manutencao", "role_auditor_manutencao"):
+        with st.expander("📋 Últimos acessos registrados (Logs_Acesso)"):
+            try:
+                logs = buscar_ultimos_acessos(10)
+                if logs:
+                    st.table(logs)
+                else:
+                    st.info("Nenhum acesso registrado ainda.")
+            except Exception as e:
+                st.error(f"Não foi possível carregar os logs: {e}")
 
-# ==========================================
-# 4. TELAS DE CADA PERFIL
-# ==========================================
-def tela_administrador():
-    st.title("Painel de Administração 🛠️")
-    st.write("Bem-vindo, Chefe! Aqui você tem acesso total para modificar o banco.")
-    
-    st.subheader("Cadastrar Nova Máquina")
-    with st.form("form_nova_maquina"):
-        tag = st.text_input("Tag da Máquina")
-        modelo = st.selectbox("Selecione o Modelo", ["Torno", "Fresa", "Compressor"])
-        serie = st.text_input("Número de Série")
-        
-        submit = st.form_submit_button("Salvar no Banco de Dados")
-        if submit:
-            # Aqui você chamaria a função do seu arquivo database.py:
-            # database.inserir_maquina(tag, modelo, serie)
-            st.success(f"Máquina {tag} inserida com sucesso no banco!")
-            
-    st.subheader("Visão Geral do Banco (Edição Habilitada)")
-    # Simulando dados puxados do MySQL
-    dados_mock = pd.DataFrame({
-        "Tag": ["MAQ-01", "MAQ-02"],
-        "Modelo": ["Torno", "Fresa"],
-        "Status": ["Operando", "Parado"]
-    })
-    # O st.data_editor permite alterar o dado direto na tabela!
-    dados_editados = st.data_editor(dados_mock, num_rows="dynamic")
-    
-    if st.button("Salvar Alterações da Tabela"):
-        # Aqui você faria um loop no 'dados_editados' disparando os UPDATEs pro banco
-        st.info("Alterações sincronizadas com o MySQL!")
+    if st.button("Sair"):
+        st.session_state.logged_in = False
+        st.session_state.user_data = None
+        st.rerun()
+    st.stop()
 
-def tela_operador():
-    st.title("Painel de Operação 🏭")
-    st.write("Bem-vindo, Operador! Seu acesso permite consultar os dados e reportar manutenções.")
-    
-    st.subheader("Máquinas na Fábrica")
-    # Simulando dados puxados do MySQL (somente leitura)
-    dados_mock = pd.DataFrame({
-        "Tag": ["MAQ-01", "MAQ-02"],
-        "Status": ["Operando", "Parado"],
-        "Localização": ["Setor A", "Setor B"]
-    })
-    st.dataframe(dados_mock)
+# ------------------------------------------------------------------
+# TELA DE LOGIN
+# ------------------------------------------------------------------
+col_left, col_right = st.columns([1.05, 1], gap="large")
 
-# ==========================================
-# 5. GERENCIADOR DE ROTAS (Navegação)
-# ==========================================
-if not st.session_state['logado']:
-    tela_login()
-else:
-    # Cria um menu lateral amigável para quem está logado
-    with st.sidebar:
-        st.header(f"Olá, {st.session_state['usuario'].capitalize()}!")
-        st.write(f"**Perfil:** {st.session_state['perfil']}")
-        st.divider()
-        if st.button("Sair (Logout)"):
-            st.session_state['logado'] = False
-            st.session_state['usuario'] = ""
-            st.session_state['perfil'] = ""
-            st.rerun()
+with col_left:
+    st.markdown(f"""
+    <div class="blue-panel">
+        <div class="brand-box">
+            <div class="brand-icon">🔧</div>
+            <div>
+                <div class="brand-title">THAF Manutenção</div>
+                <div class="brand-sub">Gestão Industrial Corporativa</div>
+            </div>
+        </div>
+        <div>
+            <div class="hero-title">Controle total da<br>manutenção<br>industrial.</div>
+            <div class="hero-desc">
+                Ordens de serviço, máquinas, almoxarifado, ferramentas e matriz
+                de risco EPI — unificados em uma única plataforma com controle
+                de acesso por perfil.
+            </div>
+            <div class="stats-row">
+                <div class="stat-card"><div class="stat-num">142</div><div class="stat-label">Máquinas</div></div>
+                <div class="stat-card"><div class="stat-num">38</div><div class="stat-label">OS em aberto</div></div>
+                <div class="stat-card"><div class="stat-num">99.2%</div><div class="stat-label">Disponibilidade</div></div>
+            </div>
+            <div class="maint-strip">🛠️ Próxima manutenção preventiva: <b>Torno CNC-04</b> em 3 dias</div>
+            <div class="db-strip">{"🟢 Conectado ao banco Manutencao" if not st.session_state.db_error else "🔴 Falha ao conectar ao banco — veja detalhes ao lado"}</div>
+        </div>
+        <div class="footer-note">🛡️ Acesso segmentado por Roles (Admin, Supervisor, Técnico, Auditor)</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Redireciona para a tela certa com base no perfil
-    if st.session_state['perfil'] == "Administrador":
-        tela_administrador()
-    elif st.session_state['perfil'] == "Operador":
-        tela_operador()
+with col_right:
+    st.markdown('<div class="white-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="login-title">Acesse sua conta</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-sub">Entre com suas credenciais corporativas para continuar.</div>', unsafe_allow_html=True)
+
+    if st.session_state.db_error:
+        st.error(f"Não foi possível conectar ao banco:\n\n{st.session_state.db_error}")
+
+    st.text_input("E-mail", key="email_input", placeholder="nome@thaf.com")
+    st.text_input("Senha", key="senha_input", type="password", placeholder="••••••••")
+
+    if st.session_state.get("login_error"):
+        st.error("E-mail ou senha inválidos.")
+        st.session_state.login_error = False
+
+    st.markdown('<div class="entrar-btn">', unsafe_allow_html=True)
+    st.button("→  Entrar", on_click=do_login)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="demo-label">ACESSO RÁPIDO DE DEMONSTRAÇÃO</div>', unsafe_allow_html=True)
+
+    d1, d2 = st.columns(2)
+    with d1:
+        st.markdown('<div class="demo-btn">', unsafe_allow_html=True)
+        st.button("Administrador\ntauani@thaf.com", key="btn_admin",
+                  on_click=quick_login, args=("tauani@thaf.com",))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="demo-btn">', unsafe_allow_html=True)
+        st.button("Técnico\nana@thaf.com", key="btn_tec",
+                  on_click=quick_login, args=("ana@thaf.com",))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with d2:
+        st.markdown('<div class="demo-btn">', unsafe_allow_html=True)
+        st.button("Supervisor\nfelipe@thaf.com", key="btn_sup",
+                  on_click=quick_login, args=("felipe@thaf.com",))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="demo-btn">', unsafe_allow_html=True)
+        st.button("Auditor\nhenrique@thaf.com", key="btn_aud",
+                  on_click=quick_login, args=("henrique@thaf.com",))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state.logged_in:
+        st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)

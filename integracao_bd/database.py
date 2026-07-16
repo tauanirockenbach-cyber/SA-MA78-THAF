@@ -1,6 +1,5 @@
 # Módulo de infraestrutura: Conexão com o Banco de Dados
 # Instalar no terminal: pip install mysql-connector-python python-dotenv
-
 import os
 import mysql.connector
 from dotenv import load_dotenv
