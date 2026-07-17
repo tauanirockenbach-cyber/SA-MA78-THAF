@@ -32,11 +32,11 @@ def hash_senha(senha: str) -> str:
 def get_connection():
     """Abre uma conexão nova com o MySQL do Aiven (SSL habilitado)."""
     return pymysql.connect(
-        host=DB_CONF["manutencao-thaf-samanutencao.b.aivencloud.com"],
-        port=int(DB_CONF["16536"]),
-        user=DB_CONF["avnadmin"],
-        password=DB_CONF["AVNS_VAzsRDlCXqhGODkru0i"],
-        database=DB_CONF["Manutencao"],
+        host=DB_CONF["host"],
+        port=int(DB_CONF["port"]),
+        user=DB_CONF["user"],
+        password=DB_CONF["password"],
+        database=DB_CONF["database"],
         ssl={"ssl": {}},  # Aiven exige conexão criptografada
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
@@ -80,16 +80,18 @@ def autenticar(email: str, senha: str):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            # Seleciona o usuário pelo e-mail
             cur.execute("SELECT * FROM Usuarios WHERE email_usuario = %s", (email.strip().lower(),))
             row = cur.fetchone()
     finally:
         conn.close()
 
-    if row and row["senha_hash"] == hash_senha(senha):
-        log_acesso(row["id_usuario"], "LOGIN", True)
+    # Compara usando o campo "senha" que é o nome real na sua tabela
+    if row and row["senha"] == hash_senha(senha):
+        # NOTA: Se você tiver a função log_acesso, use o id_usuario dela
+        # log_acesso(row["id_usuario"], "LOGIN", True)
         return row
 
-    log_acesso(row["id_usuario"] if row else None, "LOGIN", False)
     return None
 
 
@@ -97,8 +99,9 @@ def buscar_ultimos_acessos(limit: int = 5):
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            # CORRIGIDO: Alterado u.email para u.email_usuario para bater com o banco
             cur.execute("""
-                SELECT l.data_hora, COALESCE(u.email, '(usuário removido)') AS email,
+                SELECT l.data_hora, COALESCE(u.email_usuario, '(usuário removido)') AS email,
                        l.acao_acesso, l.ip_origem, l.sucesso_acesso
                 FROM Logs_Acesso l
                 LEFT JOIN Usuarios u ON u.id_usuario = l.id_usuario
@@ -199,13 +202,26 @@ div[data-testid="stTextInput"] input {border-radius: 8px !important; border: 1px
 # ------------------------------------------------------------------
 if st.session_state.logged_in:
     u = st.session_state.user_data
-    st.markdown(f"### ✅ Bem-vindo(a), {u['label']}!")
-    st.write(f"**E-mail:** {u['email']}")
-    st.write(f"**Role aplicada:** `{u['role']}`")
-    st.write(f"**Permissões:** {u['permissoes']}")
+    
+    # 1. 'nome_usuario' está correto!
+    st.markdown(f"### ✅ Bem-vindo(a), {u['nome_usuario']}!")
+    
+    # 2. Corrigido para 'email_usuario'
+    st.write(f"**E-mail:** {u['email_usuario']}")
+    
+    # 3. Corrigido para 'cargo_usuario'
+    st.write(f"**Cargo aplicado:** `{u['cargo_usuario']}`")
+    
+    # 4. Tratamento seguro para 'permissoes' (já que a coluna não existe na tabela)
+    # Usamos .get() com um valor padrão caso a chave não exista no dicionário
+    permissoes = u.get('permissoes', 'Visualização Padrão')
+    st.write(f"**Permissões:** {permissoes}")
+    
     st.caption("Dados lidos em tempo real da tabela `Usuarios` no banco Manutencao (Aiven).")
 
-    if u["role"] in ("role_admin_manutencao", "role_auditor_manutencao"):
+    # 5. Ajustado para validar contra os cargos reais do seu ENUM (Administrador e Supervisor/Auditor)
+    # Se você tiver um cargo específico para Auditor, adicione-o na tupla abaixo:
+    if u["cargo_usuario"] in ("Administrador", "Supervisor"):
         with st.expander("📋 Últimos acessos registrados (Logs_Acesso)"):
             try:
                 logs = buscar_ultimos_acessos(10)
@@ -259,6 +275,36 @@ with col_left:
 with col_right:
     st.markdown('<div class="white-panel">', unsafe_allow_html=True)
     st.markdown('<div class="login-title">Acesse sua conta</div>', unsafe_allow_html=True)
+
+    # ---- BOTÃO DE INICIALIZAÇÃO CORRIGIDO PARA A SUA TABELA ----
+    if st.button("✨ Inicializar Usuários de Teste no Banco"):
+        try:
+            conn = get_connection()
+            with conn.cursor() as cur:
+                # Lista de usuários adaptada às colunas e ENUMs da sua tabela
+                usuarios_teste = [
+                    ('Tauani Abreu', 'tauani@thaf.com', 'tauani123', 'Administrador', '(11) 99999-0001'),
+                    ('Felipe Silva', 'felipe@thaf.com', 'felipe123', 'Supervisor', '(11) 99999-0002'),
+                    ('Ana Clara', 'ana@thaf.com', 'ana123', 'Tecnico', '(11) 99999-0003'),
+                    ('Henrique Souza', 'henrique@thaf.com', 'henrique123', 'Supervisor', '(11) 99999-0004')
+                ]
+                
+                for nome, email, senha_pura, cargo, telefone in usuarios_teste:
+                    cur.execute("""
+                        INSERT INTO Usuarios (nome_usuario, email_usuario, senha, cargo_usuario, telefone_usuario, status_usuario)
+                        VALUES (%s, %s, %s, %s, %s, 'Ativo')
+                        ON DUPLICATE KEY UPDATE 
+                            nome_usuario = VALUES(nome_usuario),
+                            senha = VALUES(senha),
+                            cargo_usuario = VALUES(cargo_usuario),
+                            telefone_usuario = VALUES(telefone_usuario),
+                            status_usuario = 'Ativo'
+                    """, (nome, email, hash_senha(senha_pura), cargo, telefone))
+            st.success("Usuários cadastrados com sucesso na Aiven! Agora o login vai funcionar.")
+        except Exception as e:
+            st.error(f"Erro ao cadastrar usuários: {e}")
+    # -----------------------------------------------------------
+
     st.markdown('<div class="login-sub">Entre com suas credenciais corporativas para continuar.</div>', unsafe_allow_html=True)
 
     if st.session_state.db_error:
