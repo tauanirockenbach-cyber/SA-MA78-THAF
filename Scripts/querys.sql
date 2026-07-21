@@ -32,9 +32,10 @@ from Almoxarifado_Pecas
 where quantidade_estoque < 10;
 
 -- Quais OS estão abertas ou em andamento e quem é o técnico responsável?
-select OS.id_os, OS.descricao_falha, OS.status_os, U.nome_usuario 
+select OS.id_os, OS.descricao_falha, OS.status_os, U.nome_usuario
 from Ordens_Servico as OS
-join Usuarios as U on U.id_usuario = OS.id_tecnico_responsavel;
+join Usuarios as U on U.id_usuario = OS.id_usuario
+where OS.status_os in ('Aberto', 'Em andamento');
 
 -- Qual o valor total em peças no almoxarifado?
 select sum(quantidade_estoque * custo_unitario) as Valor_total 
@@ -66,7 +67,7 @@ where OS.id_os = 1003;
 -- OS concluídas por cada técnico
 select U.nome_usuario, count(OS.id_os) as OS_concluidas 
 from Usuarios as U
-join Ordens_Servico as OS on OS.id_tecnico_responsavel = U.id_usuario
+join Ordens_Servico as OS on OS.id_usuario = U.id_usuario
 where status_os = 'Concluído'
 group by U.nome_usuario;
 
@@ -89,10 +90,10 @@ where id_ferramenta not in (select id_ferramenta from OS_Ferramentas);
 select fabricante_maquina, count(nome_maquina) as quantidade_maquinas from Modelos_Maquinas
 group by fabricante_maquina;
 
--- OS em andamento por cada técnico
+-- OS em andamento por cada técnico 
 select U.nome_usuario, count(OS.id_os) as OS_em_andamento 
 from Usuarios as U
-join Ordens_Servico as OS on OS.id_tecnico_responsavel = U.id_usuario
+join Ordens_Servico as OS on OS.id_usuario = U.id_usuario
 where status_os = 'Em andamento'
 group by U.nome_usuario;
 
@@ -107,16 +108,14 @@ SELECT
     MF.data_devolucao_prevista,
     MF.status_movimentacao
 FROM Movimentacao_Ferramentas MF
-JOIN Almoxarifado_Ferramentas AF ON MF.id_ferramenta = AF.id_ferramenta
-JOIN Tecnicos T ON MF.id_tecnico_solicitante = T.id_tecnico
-JOIN Usuarios U_Tec ON T.id_usuario = U_Tec.id_usuario
-LEFT JOIN Usuarios U_Alm ON MF.id_almoxarife_entregador = U_Alm.id_usuario
+JOIN OS_Ferramentas OSF ON MF.id_os_ferramenta = OSF.id_os_ferramenta
+JOIN Almoxarifado_Ferramentas AF ON OSF.id_ferramenta = AF.id_ferramenta
+JOIN Usuarios U_Tec ON MF.id_usuario_solicitante = U_Tec.id_usuario
+LEFT JOIN Usuarios U_Alm ON MF.id_usuario_entregador = U_Alm.id_usuario
 WHERE MF.status_movimentacao = 'Atrasado'
-   OR MF.status_movimentacao = 'Extraviado'
    OR (MF.data_devolucao_prevista < NOW() AND MF.data_devolucao_real IS NULL);
 
-
--- Quais componentes do almoxarifado que estão com saldo zero e que possuem ordens de serviço atreladas precisando desse material.
+-- Quais componentes do almoxarifado que estão com saldo zero e que possuem ordens de serviço atreladas precisando desse material. ---------------
 SELECT
     AP.id_peca,
     AP.nome_peca,
@@ -133,7 +132,6 @@ GROUP BY
     AP.custo_unitario
 ORDER BY vezes_solicitada_em_os DESC;
 
-
 -- Cronograma de riscos e EPIs obrigatórios por equipamento ativo.
 SELECT DISTINCT
     M.tag_equipamento,
@@ -149,7 +147,6 @@ JOIN OS_Seguranca OSS ON OS.id_os = OSS.id_os
 JOIN Matriz_Riscos_EPI MR ON OSS.id_risco = MR.id_risco
 WHERE M.status_operacional = 'Operando'
 ORDER BY S.nome_setor, M.tag_equipamento;
-
 
 -- Exiba quais fabricantes e modelos específicos de equipamentos estão gerando o maior volume de ordens de serviço por falhas mecânicas/operacionais.
 SELECT
@@ -171,14 +168,13 @@ ORDER BY total_de_quebras_registradas DESC;
 select U.nome_usuario, 
     sec_to_time(avg(time_to_sec(timediff(OS.hh_fim, OS.hh_inicio)))) as tempo_medio_trabalho 
 from Usuarios as U
-join Tecnicos as T on T.id_usuario = U.id_usuario
-join Ordens_Servico as OS on OS.id_tecnico_responsavel = T.id_tecnico
+join Ordens_Servico as OS on OS.id_usuario = U.id_usuario
 where status_os = 'Concluído'
     and OS.hh_fim is not null
 group by U.nome_usuario;
 
 -- Componentes mais utilizados pela fábrica
-select nome_peca, sum(OM.id_peca) as quantidade_pecas_usadas, S.nome_setor as setor_mais_usado 
+select nome_peca, sum(OM.quantidade_utilizada) as quantidade_pecas_usadas, S.nome_setor as setor_mais_usado 
 from OS_Materiais as OM 
 join Almoxarifado_Pecas as AP on OM.id_peca = AP.id_peca
 join Ordens_Servico as OS on OM.id_os = OS.id_os
@@ -193,12 +189,11 @@ from Maquinas as M
 join Modelos_Maquinas as MM on M.id_maquina = MM.id_maquina
 join Ordens_Servico as OS on OS.tag_equipamento = M.tag_equipamento
 where data_abertura >= date_sub(now(), interval 5 year)
-group by tag_equipamento
+group by M.tag_equipamento, MM.nome_maquina
 order by quantidade_falhas desc;
 
 -- Painel de Status: Onde está cada pessoa (Técnicos)?
-select T.disponibilidade_tecnico, count(U.id_usuario) as quantidade_tecnicos
+select U.disponibilidade_tecnico, count(U.id_usuario) as quantidade_tecnicos
 from Usuarios as U
-join Tecnicos as T on T.id_usuario = U.id_usuario
 where cargo_usuario = 'Tecnico'
-group by T.disponibilidade_tecnico;
+group by U.disponibilidade_tecnico;
