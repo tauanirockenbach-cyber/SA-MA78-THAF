@@ -29,6 +29,9 @@ from ferramentas import opcao_desejada_ferramenta
 # Importa a função responsável pelo menu de Movimentação de Ferramentas
 from mov_ferramentas import opcao_desejada_movimentacao
 
+# Importa a função responsavel pelo menu de Relatório
+from relatorio import relatorio_producao_por_setor
+
 
 # Mantém o menu principal em execução até que o usuário escolha sair
 while True:
@@ -59,6 +62,7 @@ while True:
     print("7 - OS Menu")
     print("8 - Ferramentas")
     print("9 - Movimentação de ferramentas Menu")
+    print("10 - Relatório")
     print("0 - Sair")
 
     # Lê a opção escolhida pelo usuário
@@ -99,6 +103,10 @@ while True:
     # Direciona para o menu de Movimentação de Ferramentas
     elif opcao == 9:
         opcao_desejada_movimentacao()
+
+    # Direciona para o menu de Relatório
+    elif opcao == 10:
+        relatorio_producao_por_setor()
 
     # Encerra a execução do sistema
     elif opcao == 0:
