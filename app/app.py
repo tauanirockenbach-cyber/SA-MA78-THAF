@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pymysql
 import streamlit as st
+from dbutils.pooled_db import PooledDB
 
 FUSO_BRASIL = ZoneInfo("America/Sao_Paulo")
 
@@ -47,8 +48,18 @@ def hash_senha(senha: str) -> str:
     return hashlib.sha1(senha.encode("utf-8")).hexdigest()
 
 
-def get_connection():
-    return pymysql.connect(
+@st.cache_resource
+def get_pool():
+    """Cria (uma única vez por processo, graças ao cache_resource) um pool de
+    conexões reutilizável com o MySQL. Evita abrir/fechar uma conexão TCP nova
+    a cada rerun do Streamlit, que é o maior custo de latência das páginas."""
+    return PooledDB(
+        creator=pymysql,
+        maxconnections=15,
+        mincached=2,
+        maxcached=5,
+        blocking=True,
+        ping=1,  # testa a conexão antes de entregá-la (reconecta se caiu)
         host=DB_CONF["host"],
         port=int(DB_CONF["port"]),
         user=DB_CONF["user"],
@@ -58,6 +69,13 @@ def get_connection():
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
     )
+
+
+def get_connection():
+    """Pega uma conexão emprestada do pool. Continua suportando o mesmo
+    padrão `conn = get_connection(); ... ; conn.close()` usado no resto do
+    código — o `close()` aqui apenas devolve a conexão ao pool."""
+    return get_pool().connection()
 
 
 def get_client_ip() -> str:
@@ -105,6 +123,7 @@ def autenticar(email: str, senha: str):
     return None
 
 
+@st.cache_data(ttl=30)
 def buscar_ultimos_acessos(limit: int = 5):
     conn = get_connection()
     try:
@@ -125,6 +144,7 @@ def buscar_ultimos_acessos(limit: int = 5):
 STATUS_OS_OPCOES = ["Aberto", "Em andamento", "Concluído"]
 
 
+@st.cache_data(ttl=30)
 def listar_tecnicos():
     conn = get_connection()
     try:
@@ -139,6 +159,7 @@ def listar_tecnicos():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_ordens_servico(busca: str = ""):
     conn = get_connection()
     try:
@@ -162,6 +183,7 @@ def listar_ordens_servico(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_maquinas(busca: str = ""):
     """Lista as máquinas cadastradas, já com o modelo/fabricante (Modelos_Maquinas)
     e o setor (Setores) integrados via JOIN."""
@@ -193,6 +215,7 @@ def listar_maquinas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_setores():
     """Lista os setores com a contagem de máquinas e de usuários ativos vinculados a cada um."""
     conn = get_connection()
@@ -211,6 +234,7 @@ def listar_setores():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_pecas(busca: str = ""):
     """Lista os itens do almoxarifado de peças, com filtro opcional por nome."""
     conn = get_connection()
@@ -232,6 +256,7 @@ def listar_pecas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_ferramentas(busca: str = ""):
     """Lista as ferramentas do almoxarifado, mostrando com quem está (quando em uso/atrasada/solicitada)
     a partir da movimentação mais recente em aberto (Movimentacao_Ferramentas + OS_Ferramentas)."""
@@ -266,6 +291,7 @@ def listar_ferramentas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_riscos():
     """Lista a Matriz de Riscos (NR-01) / EPIs obrigatórios, com a contagem de OS
     em que cada risco foi associado (OS_Seguranca)."""
@@ -283,6 +309,7 @@ def listar_riscos():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_usuarios(busca: str = ""):
     """Lista os usuários com o nome do setor (JOIN com Setores)."""
     conn = get_connection()
@@ -320,9 +347,11 @@ def criar_os(tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim,
                     (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario))
-            return cur.lastrowid
+            novo_id = cur.lastrowid
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a nova OS deve aparecer imediatamente
+    return novo_id
 
 
 def atualizar_os(id_os, tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario):
@@ -337,6 +366,7 @@ def atualizar_os(id_os, tag_equipamento, descricao_falha, data_abertura, hh_inic
             """, (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario, id_os))
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a edição deve refletir imediatamente
 
 
 def excluir_os(id_os):
@@ -346,6 +376,7 @@ def excluir_os(id_os):
             cur.execute("DELETE FROM Ordens_Servico WHERE id_os = %s", (id_os,))
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a OS excluída não deve mais aparecer
 
 
 if "logged_in" not in st.session_state:
@@ -364,6 +395,15 @@ if "os_busca" not in st.session_state:
     st.session_state.os_busca = ""
 if "os_confirmar_exclusao" not in st.session_state:
     st.session_state.os_confirmar_exclusao = None
+if "tema" not in st.session_state:
+    st.session_state.tema = "escuro"
+if "login_tentativas" not in st.session_state:
+    st.session_state.login_tentativas = 0
+if "login_bloqueado_ate" not in st.session_state:
+    st.session_state.login_bloqueado_ate = None
+
+LIMITE_TENTATIVAS_LOGIN = 5
+BLOQUEIO_SEGUNDOS = 30
 
 
 def fill_demo(email, senha):
@@ -376,7 +416,23 @@ def quick_login(email, senha):
     do_login()
 
 
+def login_bloqueado():
+    """Retorna quantos segundos faltam de bloqueio (0 se não estiver bloqueado)."""
+    bloqueado_ate = st.session_state.login_bloqueado_ate
+    if not bloqueado_ate:
+        return 0
+    restante = (bloqueado_ate - agora_brasil()).total_seconds()
+    if restante <= 0:
+        st.session_state.login_bloqueado_ate = None
+        st.session_state.login_tentativas = 0
+        return 0
+    return int(restante) + 1
+
+
 def do_login():
+    if login_bloqueado() > 0:
+        return
+
     email_tentativa = st.session_state.email_input.strip().lower()
     try:
         row = autenticar(st.session_state.email_input, st.session_state.senha_input)
@@ -384,9 +440,14 @@ def do_login():
             st.session_state.logged_in = True
             st.session_state.user_data = row
             st.session_state.login_error = False
+            st.session_state.login_tentativas = 0
+            st.session_state.login_bloqueado_ate = None
             log_acesso(row["id_usuario"], "Login", True)
         else:
             st.session_state.login_error = True
+            st.session_state.login_tentativas += 1
+            if st.session_state.login_tentativas >= LIMITE_TENTATIVAS_LOGIN:
+                st.session_state.login_bloqueado_ate = agora_brasil() + timedelta(seconds=BLOQUEIO_SEGUNDOS)
             log_acesso(None, f"Login falhou (email: {email_tentativa})", False)
     except Exception as e:
         st.session_state.db_error = str(e)
@@ -403,6 +464,52 @@ def do_logout():
 
 def ir_para(pagina: str):
     st.session_state.pagina = pagina
+
+
+def alternar_tema():
+    st.session_state.tema = "claro" if st.session_state.tema == "escuro" else "escuro"
+
+
+def paginar_lista(itens, chave: str, tamanho_pagina: int = 15):
+    """Pagina uma lista em memória e desenha os controles de navegação
+    (Anterior / Próxima + indicador de página). Evita renderizar centenas de
+    linhas HTML de uma vez, o que é o maior custo de renderização das telas
+    de listagem. Retorna apenas os itens da página atual."""
+    chave_pagina = f"pagina_{chave}"
+    if chave_pagina not in st.session_state:
+        st.session_state[chave_pagina] = 0
+
+    total_itens = len(itens)
+    total_paginas = max((total_itens - 1) // tamanho_pagina + 1, 1)
+
+    if st.session_state[chave_pagina] >= total_paginas:
+        st.session_state[chave_pagina] = total_paginas - 1
+    if st.session_state[chave_pagina] < 0:
+        st.session_state[chave_pagina] = 0
+
+    pagina_atual = st.session_state[chave_pagina]
+    inicio = pagina_atual * tamanho_pagina
+    fim = inicio + tamanho_pagina
+    itens_pagina = itens[inicio:fim]
+
+    if total_itens > tamanho_pagina:
+        p1, p2, p3 = st.columns([1, 2, 1])
+        with p1:
+            if st.button("◀ Anterior", key=f"{chave}_prev", disabled=pagina_atual == 0, use_container_width=True):
+                st.session_state[chave_pagina] -= 1
+                st.rerun()
+        with p2:
+            st.markdown(
+                f'<div style="text-align:center; font-size:12.5px; color:#94a3b8; padding-top:8px;">'
+                f'Página {pagina_atual + 1} de {total_paginas} · {total_itens} registro(s)</div>',
+                unsafe_allow_html=True,
+            )
+        with p3:
+            if st.button("Próxima ▶", key=f"{chave}_next", disabled=pagina_atual >= total_paginas - 1, use_container_width=True):
+                st.session_state[chave_pagina] += 1
+                st.rerun()
+
+    return itens_pagina
 
 
 def status_slug(status: str) -> str:
@@ -460,8 +567,11 @@ def grafico_barras(df, coluna, cores_mapa=None, cor_padrao="#2563eb", moeda=Fals
     rotulos = _formatar_rotulos(dados[coluna], moeda)
     cores = [cores_mapa.get(v, cor_padrao) for v in dados[categoria_col]] if cores_mapa else cor_padrao
 
-    eixo_valor = dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False)
-    eixo_categoria = dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5))
+    cor_texto_eixo = "#94a3b8" if st.session_state.tema == "escuro" else "#64748b"
+    cor_grade = "rgba(148,163,184,0.18)" if st.session_state.tema == "escuro" else "#eef2f7"
+
+    eixo_valor = dict(showgrid=True, gridcolor=cor_grade, tickfont=dict(color=cor_texto_eixo, size=11.5), zeroline=False)
+    eixo_categoria = dict(showgrid=False, tickfont=dict(color=cor_texto_eixo, size=11.5))
 
     if horizontal:
         fig = px.bar(dados, x=coluna, y=categoria_col, orientation="h")
@@ -478,12 +588,13 @@ def grafico_barras(df, coluna, cores_mapa=None, cor_padrao="#2563eb", moeda=Fals
         )
         fig.update_layout(xaxis=eixo_categoria, yaxis=eixo_valor)
 
+    fonte = dict(_FONTE_GRAFICOS, color=cor_texto_eixo)
     fig.update_layout(
         margin=dict(l=8, r=8, t=10, b=8),
         height=altura,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=_FONTE_GRAFICOS,
+        font=fonte,
         showlegend=False,
         bargap=0.35,
         uniformtext_minsize=9,
@@ -498,6 +609,9 @@ def grafico_area(df, coluna, cor="#2563eb", altura=280):
     dados = df.reset_index()
     categoria_col = dados.columns[0]
 
+    cor_texto_eixo = "#94a3b8" if st.session_state.tema == "escuro" else "#64748b"
+    cor_grade = "rgba(148,163,184,0.18)" if st.session_state.tema == "escuro" else "#eef2f7"
+
     fig = px.area(dados, x=categoria_col, y=coluna)
     fig.update_traces(
         line=dict(color=cor, width=2.5),
@@ -506,14 +620,15 @@ def grafico_area(df, coluna, cor="#2563eb", altura=280):
         marker=dict(size=6, color=cor),
         hovertemplate="<b>%{x}</b><br>%{y}<extra></extra>",
     )
+    fonte = dict(_FONTE_GRAFICOS, color=cor_texto_eixo)
     fig.update_layout(
         margin=dict(l=8, r=8, t=10, b=8),
         height=altura,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=_FONTE_GRAFICOS,
-        xaxis=dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5)),
-        yaxis=dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False),
+        font=fonte,
+        xaxis=dict(showgrid=False, tickfont=dict(color=cor_texto_eixo, size=11.5)),
+        yaxis=dict(showgrid=True, gridcolor=cor_grade, tickfont=dict(color=cor_texto_eixo, size=11.5), zeroline=False),
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
@@ -589,33 +704,65 @@ def dialog_editar_os(row):
             st.error(f"Erro ao atualizar no banco: {e}")
 
 
-st.markdown("""
+# ------------------------------------------------------------------
+# TEMA (claro/escuro) — paleta de cores conforme st.session_state.tema
+# ------------------------------------------------------------------
+if st.session_state.tema == "escuro":
+    TEMA = dict(
+        app_bg="#0b1220",
+        sidebar_bg="#0f172a",
+        card_bg="#111827",
+        card_border="#1f2937",
+        text_primary="#e5e7eb",
+        text_secondary="#94a3b8",
+        text_muted="#64748b",
+        input_bg="#0b1220",
+        input_border="#1f2937",
+        table_header_border="#1f2937",
+        row_border="#1f2937",
+    )
+else:
+    TEMA = dict(
+        app_bg="#f1f5f9",
+        sidebar_bg="#0f172a",
+        card_bg="#ffffff",
+        card_border="#e2e8f0",
+        text_primary="#0f172a",
+        text_secondary="#64748b",
+        text_muted="#64748b",
+        input_bg="#ffffff",
+        input_border="#e2e8f0",
+        table_header_border="#e2e8f0",
+        row_border="#e2e8f0",
+    )
+
+st.markdown(f"""
 <style>
-#MainMenu, header, footer {visibility: hidden;}
-html, body {margin: 0; padding: 0;}
-.block-container {padding: 0 !important; max-width: 100% !important;}
-.stApp {background: #0b1b3a;}
-[data-testid="stAppViewContainer"], [data-testid="stMain"] {padding: 0 !important;}
+#MainMenu, header, footer {{visibility: hidden;}}
+html, body {{margin: 0; padding: 0;}}
+.block-container {{padding: 0 !important; max-width: 100% !important;}}
+.stApp {{background: #0b1b3a;}}
+[data-testid="stAppViewContainer"], [data-testid="stMain"] {{padding: 0 !important;}}
 
 /* ======================================================================
    TELA DE LOGIN — estilo "foguete", tons de azul, tela inteira
    ====================================================================== */
-.st-key-unified_panel {
+.st-key-unified_panel {{
     padding: 0;
     margin: 0;
     min-height: 100vh;
     display: grid !important;
     grid-template-columns: 48fr 52fr;
     align-items: stretch;
-}
+}}
 .st-key-unified_panel > div,
 .st-key-unified_panel > div > div,
-.st-key-unified_panel > div > div > div {
+.st-key-unified_panel > div > div > div {{
     height: 100%;
-}
+}}
 
 /* ---------- Painel esquerdo: decorativo, foguete, várias tonalidades de azul ---------- */
-.st-key-rocket_panel {
+.st-key-rocket_panel {{
     position: relative;
     overflow: hidden;
     min-height: 100vh;
@@ -632,300 +779,310 @@ html, body {margin: 0; padding: 0;}
         radial-gradient(circle at 25% 88%, rgba(255,255,255,0.10) 0 2px, transparent 2px),
         linear-gradient(150deg, #050e24 0%, #0c2a63 32%, #1d4ed8 62%, #38bdf8 100%);
     background-size: 60px 60px, 90px 90px, 70px 70px, 100px 100px, 80px 80px, cover;
-}
-.st-key-rocket_panel::before {
+}}
+.st-key-rocket_panel::before {{
     content: "";
     position: absolute;
     top: -70px; right: -70px;
     width: 260px; height: 260px;
     border-radius: 50%;
     background: rgba(255,255,255,0.08);
-}
-.st-key-rocket_panel::after {
+}}
+.st-key-rocket_panel::after {{
     content: "";
     position: absolute;
     bottom: -90px; left: -50px;
     width: 240px; height: 240px;
     border-radius: 50%;
     background: rgba(56,189,248,0.30);
-}
-.rocket-mid-circle {
+}}
+.rocket-mid-circle {{
     position: absolute;
     top: 50%; left: 8%;
     transform: translateY(-50%);
     width: 26px; height: 26px;
     border-radius: 50%;
     background: rgba(255,255,255,0.18);
-}
+}}
 
-.brand-box {display: flex; align-items: center; gap: 14px; position: relative; z-index: 2;}
-.brand-icon {
+.brand-box {{display: flex; align-items: center; gap: 14px; position: relative; z-index: 2;}}
+.brand-icon {{
     background: rgba(255,255,255,0.18);
     border-radius: 16px;
     width: 56px; height: 56px;
     display: flex; align-items: center; justify-content: center;
     font-size: 26px;
     flex-shrink: 0;
-}
-.brand-title {font-weight: 800; font-size: 21px; line-height: 1.1;}
-.brand-sub {font-size: 13.5px; opacity: 0.8;}
+}}
+.brand-title {{font-weight: 800; font-size: 21px; line-height: 1.1;}}
+.brand-sub {{font-size: 13.5px; opacity: 0.8;}}
 
-.rocket-stage {
+.rocket-stage {{
     position: relative;
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2;
-}
-.rocket-ring {
+}}
+.rocket-ring {{
     position: absolute;
     width: 320px; height: 320px;
     border-radius: 50%;
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.04);
-}
-.smoke-cloud {
+}}
+.smoke-cloud {{
     position: absolute;
     width: 300px; height: 300px;
     border-radius: 50%;
     background: radial-gradient(circle, rgba(255,255,255,0.40) 0%, rgba(255,255,255,0.08) 55%, transparent 72%);
     filter: blur(1px);
-}
-.rocket-emoji {
+}}
+.rocket-emoji {{
     position: relative;
     font-size: 128px;
     transform: rotate(-40deg);
     filter: drop-shadow(0 22px 22px rgba(2,6,23,0.55));
-}
+}}
 
-.rocket-tagline {
+.rocket-tagline {{
     position: relative;
     z-index: 2;
     font-size: 26px;
     font-weight: 800;
     line-height: 1.35;
     max-width: 380px;
-}
-.rocket-tagline span {
+}}
+.rocket-tagline span {{
     display: block;
     font-size: 14.5px;
     font-weight: 400;
     color: rgba(255,255,255,0.75);
     margin-top: 10px;
-}
+}}
 
-/* ---------- Painel direito: cartão de login branco, cobrindo a tela toda ---------- */
-.st-key-login_card {
+/* ---------- Painel direito: cartão de login, cobrindo a tela toda ---------- */
+.st-key-login_card {{
     box-sizing: border-box;
     width: 100%;
     min-height: 100vh;
     padding: 72px 9vw;
     margin: 0;
-    background: #ffffff;
+    background: {TEMA['card_bg']};
     display: flex !important;
     flex-direction: column;
     justify-content: center;
-}
-.login-eyebrow {
+}}
+.login-eyebrow {{
     color: #2563eb;
     font-weight: 700;
     font-size: 12.5px;
     letter-spacing: 0.10em;
     text-transform: uppercase;
     margin-bottom: 10px;
-}
-.login-title {font-size: 40px; font-weight: 800; color: #0c1e3e; margin-bottom: 8px;}
-.login-sub {color: #64748b; font-size: 15.5px; margin-bottom: 36px;}
+}}
+.login-title {{font-size: 40px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 8px;}}
+.login-sub {{color: {TEMA['text_secondary']}; font-size: 15.5px; margin-bottom: 36px;}}
 
-div[data-testid="stTextInput"] label p {color: #334155 !important; font-size: 14.5px !important; font-weight: 600;}
+div[data-testid="stTextInput"] label p {{color: {TEMA['text_primary']} !important; font-size: 14.5px !important; font-weight: 600;}}
 
-div[data-testid="stTextInput"] input {
+div[data-testid="stTextInput"] input {{
     border-radius: 999px !important;
-    border: 1.5px solid #dbeafe !important;
-    background: #f8fafc !important;
-    color: #0c1e3e !important;
+    border: 1.5px solid {TEMA['input_border']} !important;
+    background: {TEMA['input_bg']} !important;
+    color: {TEMA['text_primary']} !important;
     padding: 16px 22px !important;
     font-size: 15.5px !important;
-}
-div[data-testid="stTextInput"] input:focus {
+}}
+div[data-testid="stTextInput"] input:focus {{
     border-color: #38bdf8 !important;
     box-shadow: 0 0 0 3px rgba(56,189,248,0.20) !important;
-}
-div[data-testid="stTextInput"] input::placeholder {color: #94a3b8 !important;}
-div[data-testid="stTextInput"] {margin-bottom: 10px;}
+}}
+div[data-testid="stTextInput"] input::placeholder {{color: #94a3b8 !important;}}
+div[data-testid="stTextInput"] {{margin-bottom: 10px;}}
 
-.login-row {
+.login-row {{
     display: flex; justify-content: space-between; align-items: center;
-    font-size: 13.5px; color: #64748b; margin: 4px 4px 22px 4px;
-}
-.login-row .login-link {color: #2563eb; font-weight: 600; cursor: pointer;}
+    font-size: 13.5px; color: {TEMA['text_secondary']}; margin: 4px 4px 22px 4px;
+}}
+.login-row .login-link {{color: #2563eb; font-weight: 600; cursor: pointer;}}
 
-.stButton>button {width: 100%; border-radius: 999px; font-weight: 700; font-size: 16.5px;}
+.stButton>button {{width: 100%; border-radius: 999px; font-weight: 700; font-size: 16.5px;}}
 
-.st-key-entrar_btn_wrap button {
+.st-key-entrar_btn_wrap button {{
     background: linear-gradient(90deg, #1d4ed8 0%, #38bdf8 100%);
     color: #ffffff; border: none; padding: 17px 0; font-weight: 700; font-size: 16.5px;
     box-shadow: 0 12px 24px rgba(29,78,216,0.35);
-}
-.st-key-entrar_btn_wrap button:hover {filter: brightness(1.05);}
+}}
+.st-key-entrar_btn_wrap button:hover {{filter: brightness(1.05);}}
+.st-key-entrar_btn_wrap button:disabled {{opacity: 0.55; box-shadow: none; cursor: not-allowed;}}
 
-.demo-label {
+.demo-label {{
     font-size: 12px; letter-spacing: 0.08em; color: #94a3b8;
     text-transform: uppercase; font-weight: 700; margin: 38px 0 14px 2px;
-}
+}}
 .st-key-demo_0 button, .st-key-demo_1 button,
-.st-key-demo_2 button, .st-key-demo_3 button {
-    background: #eff6ff;
-    border: 1.5px solid #bfdbfe;
+.st-key-demo_2 button, .st-key-demo_3 button {{
+    background: {"#111827" if st.session_state.tema == "escuro" else "#eff6ff"};
+    border: 1.5px solid {"#1f2937" if st.session_state.tema == "escuro" else "#bfdbfe"};
     border-radius: 14px;
     text-align: left; padding: 14px 16px;
-    color: #1e3a8a;
+    color: {"#93c5fd" if st.session_state.tema == "escuro" else "#1e3a8a"};
     white-space: pre-line;
     font-size: 13.5px;
     font-weight: 600;
-}
+}}
 .st-key-demo_0 button:hover, .st-key-demo_1 button:hover,
-.st-key-demo_2 button:hover, .st-key-demo_3 button:hover {
-    border-color: #38bdf8; background: #dbeafe;
-}
+.st-key-demo_2 button:hover, .st-key-demo_3 button:hover {{
+    border-color: #38bdf8; background: {"#1e293b" if st.session_state.tema == "escuro" else "#dbeafe"};
+}}
+
+.tema-toggle-wrap {{position: absolute; top: 28px; right: 28px; z-index: 3;}}
+.st-key-tema_toggle_login button, .st-key-tema_toggle_app button {{
+    width: auto; border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 700;
+    background: {"rgba(255,255,255,0.10)" if st.session_state.tema == "escuro" else "#eff6ff"};
+    color: {"#e5e7eb" if st.session_state.tema == "escuro" else "#1e3a8a"};
+    border: 1.5px solid {"rgba(255,255,255,0.18)" if st.session_state.tema == "escuro" else "#bfdbfe"};
+}}
 
 /* ================================================================
    PÓS-LOGIN: sidebar + tela de Ordens de Serviço
    ================================================================ */
-.stApp {background: #f1f5f9;}
+.stApp {{background: {TEMA['app_bg']};}}
 
-.st-key-sidebar {
-    background: #0f172a;
+.st-key-sidebar {{
+    background: {TEMA['sidebar_bg']};
     min-height: 100vh;
     padding: 24px 16px;
     color: white;
-}
-.sidebar-brand {display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px;}
-.sidebar-brand-icon {
+}}
+.sidebar-brand {{display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px;}}
+.sidebar-brand-icon {{
     background: #2563eb; border-radius: 10px; width: 38px; height: 38px;
     display: flex; align-items: center; justify-content: center; font-size: 17px;
-}
-.sidebar-brand-title {font-weight: 800; font-size: 14.5px; color: white; line-height: 1.1;}
-.sidebar-brand-sub {font-size: 10.5px; color: rgba(255,255,255,0.55);}
-.sidebar-section-label {
+}}
+.sidebar-brand-title {{font-weight: 800; font-size: 14.5px; color: white; line-height: 1.1;}}
+.sidebar-brand-sub {{font-size: 10.5px; color: rgba(255,255,255,0.55);}}
+.sidebar-section-label {{
     font-size: 10.5px; letter-spacing: 0.06em; color: rgba(255,255,255,0.45);
     text-transform: uppercase; margin: 14px 8px 6px 8px;
-}
-.st-key-sidebar .stButton>button {
+}}
+.st-key-sidebar .stButton>button {{
     background: transparent; color: rgba(255,255,255,0.75); border: none;
     text-align: left; font-weight: 500; font-size: 13.5px; padding: 8px 10px;
     border-radius: 8px;
-}
-.st-key-sidebar .stButton>button:hover {background: rgba(255,255,255,0.08); color: white;}
+}}
+.st-key-sidebar .stButton>button:hover {{background: rgba(255,255,255,0.08); color: white;}}
 
-.topbar-title {font-size: 22px; font-weight: 800; color: #0f172a;}
-.topbar-breadcrumb {font-size: 12.5px; color: #94a3b8; margin-bottom: 2px;}
-.topbar-sub {color: #64748b; font-size: 13.5px; margin: 4px 0 18px 0;}
+.topbar-title {{font-size: 22px; font-weight: 800; color: {TEMA['text_primary']};}}
+.topbar-breadcrumb {{font-size: 12.5px; color: {TEMA['text_muted']}; margin-bottom: 2px;}}
+.topbar-sub {{color: {TEMA['text_secondary']}; font-size: 13.5px; margin: 4px 0 18px 0;}}
 
-.status-badge {
+.status-badge {{
     display: inline-block; padding: 3px 10px; border-radius: 20px;
     font-size: 11.5px; font-weight: 700;
-}
-.status-aberto {background: #fee2e2; color: #b91c1c;}
-.status-em-andamento {background: #dbeafe; color: #1d4ed8;}
-.status-concluido {background: #dcfce7; color: #15803d;}
+}}
+.status-aberto {{background: #fee2e2; color: #b91c1c;}}
+.status-em-andamento {{background: #dbeafe; color: #1d4ed8;}}
+.status-concluido {{background: #dcfce7; color: #15803d;}}
 
-.os-row {border-bottom: 1px solid #e2e8f0; padding: 10px 0;}
-.os-header {font-size: 11.5px; letter-spacing: 0.04em; color: #94a3b8; text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid #e2e8f0;}
-.os-cell {font-size: 13.5px; color: #0f172a;}
-.os-cell-muted {font-size: 12px; color: #64748b;}
+.os-row {{border-bottom: 1px solid {TEMA['row_border']}; padding: 10px 0;}}
+.os-header {{font-size: 11.5px; letter-spacing: 0.04em; color: {TEMA['text_muted']}; text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid {TEMA['table_header_border']};}}
+.os-cell {{font-size: 13.5px; color: {TEMA['text_primary']};}}
+.os-cell-muted {{font-size: 12px; color: {TEMA['text_muted']};}}
 
-.st-key-topbar_search input {
-    border-radius: 8px !important; border: 1px solid #e2e8f0 !important;
-}
-.st-key-nova_os_btn button {background: #2563eb; color: white; border: none; font-weight: 700;}
-.st-key-nova_os_btn button:hover {background: #1d4ed8; color: white;}
-.st-key-logout_btn button {background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;}
+.st-key-topbar_search input {{
+    border-radius: 8px !important; border: 1px solid {TEMA['input_border']} !important;
+    background: {TEMA['input_bg']} !important; color: {TEMA['text_primary']} !important;
+}}
+.st-key-nova_os_btn button {{background: #2563eb; color: white; border: none; font-weight: 700;}}
+.st-key-nova_os_btn button:hover {{background: #1d4ed8; color: white;}}
+.st-key-logout_btn button {{background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;}}
 
 /* ---------- Tela de Máquinas: KPIs e gráficos ---------- */
-.kpi-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.kpi-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-left: 5px solid #2563eb;
     border-radius: 12px;
     padding: 16px 18px;
     margin-bottom: 8px;
-}
-.kpi-card.kpi-green {border-left-color: #16a34a;}
-.kpi-card.kpi-red {border-left-color: #dc2626;}
-.kpi-card.kpi-blue {border-left-color: #0ea5e9;}
-.kpi-value {font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.1;}
-.kpi-label {font-size: 12.5px; color: #64748b; margin-top: 4px;}
+}}
+.kpi-card.kpi-green {{border-left-color: #16a34a;}}
+.kpi-card.kpi-red {{border-left-color: #dc2626;}}
+.kpi-card.kpi-blue {{border-left-color: #0ea5e9;}}
+.kpi-value {{font-size: 26px; font-weight: 800; color: {TEMA['text_primary']}; line-height: 1.1;}}
+.kpi-label {{font-size: 12.5px; color: {TEMA['text_secondary']}; margin-top: 4px;}}
 
-.chart-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.chart-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-radius: 12px;
     padding: 18px 20px 6px 20px;
     margin-bottom: 16px;
-}
-.chart-title {font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 10px;}
+}}
+.chart-title {{font-size: 14px; font-weight: 700; color: {TEMA['text_primary']}; margin-bottom: 10px;}}
 
-.status-operando {background: #dcfce7; color: #15803d;}
-.status-parado {background: #fee2e2; color: #b91c1c;}
-.status-em-manutencao {background: #dbeafe; color: #1d4ed8;}
+.status-operando {{background: #dcfce7; color: #15803d;}}
+.status-parado {{background: #fee2e2; color: #b91c1c;}}
+.status-em-manutencao {{background: #dbeafe; color: #1d4ed8;}}
 
 /* ---------- Tela de Setores ---------- */
-.setor-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.setor-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-radius: 14px;
     padding: 20px 22px;
     height: 100%;
     box-sizing: border-box;
-}
-.setor-card-title {font-size: 16px; font-weight: 800; color: #0f172a; margin-bottom: 4px;}
-.setor-card-desc {font-size: 12.5px; color: #64748b; margin-bottom: 16px; min-height: 32px;}
-.setor-card-stats {display: flex; gap: 22px;}
-.setor-stat-value {font-size: 22px; font-weight: 800; color: #2563eb; line-height: 1;}
-.setor-stat-label {font-size: 11px; color: #94a3b8; margin-top: 3px;}
+}}
+.setor-card-title {{font-size: 16px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 4px;}}
+.setor-card-desc {{font-size: 12.5px; color: {TEMA['text_secondary']}; margin-bottom: 16px; min-height: 32px;}}
+.setor-card-stats {{display: flex; gap: 22px;}}
+.setor-stat-value {{font-size: 22px; font-weight: 800; color: #2563eb; line-height: 1;}}
+.setor-stat-label {{font-size: 11px; color: #94a3b8; margin-top: 3px;}}
 
 /* ---------- Tela de Almoxarifado — Peças ---------- */
-.estoque-baixo {color: #b91c1c; font-weight: 700;}
-.estoque-ok {color: #0f172a;}
+.estoque-baixo {{color: #b91c1c; font-weight: 700;}}
+.estoque-ok {{color: {TEMA['text_primary']};}}
 
 /* ---------- Tela de Ferramentas ---------- */
-.status-disponivel {background: #dcfce7; color: #15803d;}
-.status-solicitada {background: #fef9c3; color: #a16207;}
-.status-em-uso {background: #dbeafe; color: #1d4ed8;}
-.status-manutencao-calibracao {background: #ede9fe; color: #6d28d9;}
-.status-extraviada {background: #fee2e2; color: #b91c1c;}
+.status-disponivel {{background: #dcfce7; color: #15803d;}}
+.status-solicitada {{background: #fef9c3; color: #a16207;}}
+.status-em-uso {{background: #dbeafe; color: #1d4ed8;}}
+.status-manutencao-calibracao {{background: #ede9fe; color: #6d28d9;}}
+.status-extraviada {{background: #fee2e2; color: #b91c1c;}}
 
 /* ---------- Tela de Matriz de Risco / EPI ---------- */
-.risco-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.risco-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-left: 5px solid #dc2626;
     border-radius: 14px;
     padding: 18px 20px;
     height: 100%;
     box-sizing: border-box;
-}
-.risco-card-title {font-size: 15px; font-weight: 800; color: #0f172a; margin-bottom: 8px;}
-.risco-card-epis {font-size: 12.5px; color: #475569; line-height: 1.5; margin-bottom: 12px;}
-.risco-card-tag {
+}}
+.risco-card-title {{font-size: 15px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 8px;}}
+.risco-card-epis {{font-size: 12.5px; color: {TEMA['text_secondary']}; line-height: 1.5; margin-bottom: 12px;}}
+.risco-card-tag {{
     display: inline-block; font-size: 11px; font-weight: 700; color: #b91c1c;
     background: #fee2e2; border-radius: 20px; padding: 3px 10px;
-}
+}}
 
 /* ---------- Tela de Usuários ---------- */
-.status-ativo {background: #dcfce7; color: #15803d;}
-.status-inativo {background: #f1f5f9; color: #64748b;}
-.status-em-campo {background: #dbeafe; color: #1d4ed8;}
-.status-ferias {background: #fef9c3; color: #a16207;}
-.status-afastado {background: #fee2e2; color: #b91c1c;}
-.user-avatar {
+.status-ativo {{background: #dcfce7; color: #15803d;}}
+.status-inativo {{background: #f1f5f9; color: #64748b;}}
+.status-em-campo {{background: #dbeafe; color: #1d4ed8;}}
+.status-ferias {{background: #fef9c3; color: #a16207;}}
+.status-afastado {{background: #fee2e2; color: #b91c1c;}}
+.user-avatar {{
     width: 34px; height: 34px; border-radius: 50%;
     background: #2563eb; color: #ffffff; font-weight: 700; font-size: 13px;
     display: flex; align-items: center; justify-content: center;
-}
-.user-name-cell {display: flex; align-items: center; gap: 10px;}
+}}
+.user-name-cell {{display: flex; align-items: center; gap: 10px;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -967,6 +1124,10 @@ if st.session_state.logged_in:
                 st.button(rotulo, key=f"nav_{chave}", on_click=ir_para, args=(chave,), use_container_width=True)
 
             st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+            with st.container(key="tema_toggle_app"):
+                icone_tema = "☀️ Modo claro" if st.session_state.tema == "escuro" else "🌙 Modo escuro"
+                st.button(icone_tema, on_click=alternar_tema, use_container_width=True)
+            st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
             with st.container(key="logout_btn"):
                 if st.button("Sair", use_container_width=True):
                     do_logout()
@@ -979,16 +1140,12 @@ if st.session_state.logged_in:
             st.markdown('<div class="topbar-title">Ordens de Serviço</div>', unsafe_allow_html=True)
         with top2:
             st.markdown(
-                f'<div style="text-align:right; font-size:13px; color:#0f172a;">'
+                f'<div style="text-align:right; font-size:13px; color:{TEMA["text_primary"]};">'
                 f'<b>{u["nome_usuario"]}</b><br>'
-                f'<span style="color:#64748b; font-size:11.5px;">{u["cargo_usuario"]}</span></div>',
+                f'<span style="color:{TEMA["text_muted"]}; font-size:11.5px;">{u["cargo_usuario"]}</span></div>',
                 unsafe_allow_html=True,
             )
 
-<<<<<<< HEAD
-=======
-
->>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina == "maquinas":
             st.markdown(
                 '<div class="topbar-sub">Cadastro completo dos equipamentos, integrado a Modelos_Maquinas e Setores.</div>',
@@ -1076,7 +1233,8 @@ if st.session_state.logged_in:
                                        ("Tag", "Máquina / Modelo", "Fabricante", "Localização", "Setor", "Manutenção", "Status")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in maquinas:
+                maquinas_pagina = paginar_lista(maquinas, "maquinas")
+                for row in maquinas_pagina:
                     with st.container(key=f"maq_row_{row['tag_equipamento']}"):
                         c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1])
                         c1.markdown(f'<div class="os-cell"><b>{row["tag_equipamento"]}</b></div>', unsafe_allow_html=True)
@@ -1215,7 +1373,8 @@ if st.session_state.logged_in:
                                        ("Peça", "Qtd. em estoque", "Unidade", "Custo unitário", "Valor total")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in pecas:
+                pecas_pagina = paginar_lista(pecas, "pecas")
+                for row in pecas_pagina:
                     with st.container(key=f"peca_row_{row['id_peca']}"):
                         c1, c2, c3, c4, c5 = st.columns([2.6, 1.2, 1.2, 1.3, 1.3])
                         c1.markdown(f'<div class="os-cell"><b>{row["nome_peca"]}</b></div>', unsafe_allow_html=True)
@@ -1299,7 +1458,8 @@ if st.session_state.logged_in:
                 for col, texto in zip((h1, h2, h3, h4), ("Ferramenta", "Status", "Com quem", "Devolução prevista")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in ferramentas:
+                ferramentas_pagina = paginar_lista(ferramentas, "ferramentas")
+                for row in ferramentas_pagina:
                     with st.container(key=f"ferr_row_{row['id_ferramenta']}"):
                         c1, c2, c3, c4 = st.columns([2.6, 1.4, 1.6, 1.6])
                         c1.markdown(f'<div class="os-cell"><b>{row["nome_ferramenta"]}</b></div>', unsafe_allow_html=True)
@@ -1443,7 +1603,8 @@ if st.session_state.logged_in:
                                        ("Usuário", "Cargo", "Setor", "Status", "Disponibilidade", "Telefone")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in usuarios:
+                usuarios_pagina = paginar_lista(usuarios, "usuarios")
+                for row in usuarios_pagina:
                     with st.container(key=f"user_row_{row['id_usuario']}"):
                         c1, c2, c3, c4, c5, c6 = st.columns([2.2, 1.4, 1.4, 1.1, 1.4, 1.3])
                         iniciais = "".join(p[0].upper() for p in row["nome_usuario"].split()[:2])
@@ -1828,10 +1989,6 @@ if st.session_state.logged_in:
 
             st.stop()
 
-<<<<<<< HEAD
-=======
-
->>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
             st.info("Em construção — por enquanto Ordens de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
@@ -1872,7 +2029,8 @@ if st.session_state.logged_in:
                                    ("OS", "Equipamento", "Descrição", "Abertura", "Técnico", "Status", "Ações")):
                 col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-            for row in ordens:
+            ordens_pagina = paginar_lista(ordens, "ordens_servico")
+            for row in ordens_pagina:
                 with st.container(key=f"os_row_{row['id_os']}"):
                     c1, c2, c3, c4, c5, c6, c7 = st.columns([0.6, 1, 2.4, 1.3, 1.2, 1, 0.8])
                     c1.markdown(f'<div class="os-cell">#{row["id_os"]}</div>', unsafe_allow_html=True)
@@ -1917,6 +2075,8 @@ if st.session_state.logged_in:
 # ------------------------------------------------------------------
 # TELA DE LOGIN — estilo "foguete", tons de azul, tela inteira
 # ------------------------------------------------------------------
+segundos_bloqueio_restantes = login_bloqueado()
+
 with st.container(key="unified_panel"):
 
     # ---------- Painel esquerdo: decorativo (foguete + gradiente multi-tom) ----------
@@ -1946,15 +2106,33 @@ Gestão inteligente da manutenção industrial.
 
     # ---------- Painel direito: cartão de login (cobre a tela inteira) ----------
     with st.container(key="login_card"):
-        st.markdown('<div class="login-eyebrow">Bem-vindo de volta</div>', unsafe_allow_html=True)
+        top_login1, top_login2 = st.columns([3, 1])
+        with top_login1:
+            st.markdown('<div class="login-eyebrow">Bem-vindo de volta</div>', unsafe_allow_html=True)
+        with top_login2:
+            with st.container(key="tema_toggle_login"):
+                icone_tema = "☀️ Claro" if st.session_state.tema == "escuro" else "🌙 Escuro"
+                st.button(icone_tema, on_click=alternar_tema, use_container_width=True)
+
         st.markdown('<div class="login-title">Acesse sua conta</div>', unsafe_allow_html=True)
         st.markdown('<div class="login-sub">Entre com suas credenciais corporativas para continuar.</div>', unsafe_allow_html=True)
 
         if st.session_state.db_error:
             st.error(f"Não foi possível conectar ao banco:\n\n{st.session_state.db_error}")
 
-        st.text_input("👤  E-mail", key="email_input", placeholder="nome@empresa.com")
-        st.text_input("🔒  Senha", key="senha_input", type="password", placeholder="••••••••")
+        if segundos_bloqueio_restantes > 0:
+            st.warning(
+                f"Muitas tentativas de login incorretas. Tente novamente em {segundos_bloqueio_restantes} segundo(s)."
+            )
+
+        st.text_input(
+            "👤  E-mail", key="email_input", placeholder="nome@empresa.com",
+            disabled=segundos_bloqueio_restantes > 0,
+        )
+        st.text_input(
+            "🔒  Senha", key="senha_input", type="password", placeholder="••••••••",
+            disabled=segundos_bloqueio_restantes > 0,
+        )
 
         st.markdown(
             '<div class="login-row"><span>☐ Lembrar de mim</span>'
@@ -1962,12 +2140,13 @@ Gestão inteligente da manutenção industrial.
             unsafe_allow_html=True,
         )
 
-        if st.session_state.get("login_error"):
-            st.error("E-mail ou senha inválidos.")
+        if st.session_state.get("login_error") and segundos_bloqueio_restantes == 0:
+            tentativas_restantes = max(LIMITE_TENTATIVAS_LOGIN - st.session_state.login_tentativas, 0)
+            st.error(f"E-mail ou senha inválidos. Tentativas restantes: {tentativas_restantes}.")
             st.session_state.login_error = False
 
         with st.container(key="entrar_btn_wrap"):
-            st.button("→  Entrar", on_click=do_login)
+            st.button("→  Entrar", on_click=do_login, disabled=segundos_bloqueio_restantes > 0)
 
         st.markdown('<div class="demo-label">Acesso rápido (usuários reais)</div>', unsafe_allow_html=True)
 
@@ -1976,8 +2155,16 @@ Gestão inteligente da manutenção industrial.
         for idx, (cargo, email, senha) in enumerate(ACESSO_RAPIDO_USERS):
             with colunas[idx]:
                 with st.container(key=f"demo_{idx}"):
-                    st.button(f"{cargo}\n{email}", key=f"btn_demo_{idx}",
-                              on_click=quick_login, args=(email, senha))
+                    st.button(
+                        f"{cargo}\n{email}", key=f"btn_demo_{idx}",
+                        on_click=quick_login, args=(email, senha),
+                        disabled=segundos_bloqueio_restantes > 0,
+                    )
 
         if st.session_state.logged_in:
+            st.rerun()
+
+        if segundos_bloqueio_restantes > 0:
+            import time
+            time.sleep(1)
             st.rerun()
