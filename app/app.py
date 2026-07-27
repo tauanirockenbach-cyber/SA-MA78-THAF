@@ -1,4 +1,8 @@
 import hashlib
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import pandas as pd
+import plotly.express as px
 import textwrap
 from datetime import datetime
 from datetime import datetime, timedelta
@@ -408,6 +412,111 @@ def status_slug(status: str) -> str:
         .replace("ã", "a").replace("ç", "c")
         .replace("/", "-").replace(" ", "-")
     )
+
+
+# ------------------------------------------------------------------
+# Paletas de cores por status, usadas nos gráficos Plotly (mesmas cores
+# das badges de status já definidas em CSS, para manter consistência visual)
+# ------------------------------------------------------------------
+STATUS_OS_CORES = {"Aberto": "#dc2626", "Em andamento": "#2563eb", "Concluído": "#16a34a"}
+STATUS_MAQUINA_CORES = {"Operando": "#16a34a", "Parado": "#dc2626", "Em Manutenção": "#2563eb"}
+STATUS_FERRAMENTA_CORES = {
+    "Disponível": "#16a34a",
+    "Solicitada": "#a16207",
+    "Em Uso": "#2563eb",
+    "Manutenção/Calibração": "#6d28d9",
+    "Extraviada": "#dc2626",
+}
+DISPONIBILIDADE_CORES = {
+    "Disponível": "#16a34a",
+    "Em Campo": "#2563eb",
+    "Férias": "#a16207",
+    "Afastado": "#dc2626",
+}
+
+_FONTE_GRAFICOS = dict(family="-apple-system, Segoe UI, Roboto, sans-serif", size=12.5, color="#334155")
+
+
+def _formatar_rotulos(valores, moeda: bool):
+    if moeda:
+        return [
+            f"R$ {v:,.2f}".replace(",", "§").replace(".", ",").replace("§", ".")
+            for v in valores
+        ]
+    return [f"{v:g}" for v in valores]
+
+
+def grafico_barras(df, coluna, cores_mapa=None, cor_padrao="#2563eb", moeda=False, altura=280, horizontal=False):
+    """Renderiza um gráfico de barras com Plotly a partir de um DataFrame cujo
+    índice é a categoria e cuja coluna `coluna` traz o valor numérico. Substitui
+    o st.bar_chart nativo por um visual mais rico (cores por status, rótulos,
+    fundo transparente combinando com os cards do app)."""
+    dados = df.reset_index()
+    categoria_col = dados.columns[0]
+
+    if horizontal:
+        dados = dados.sort_values(coluna, ascending=True)
+
+    rotulos = _formatar_rotulos(dados[coluna], moeda)
+    cores = [cores_mapa.get(v, cor_padrao) for v in dados[categoria_col]] if cores_mapa else cor_padrao
+
+    eixo_valor = dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False)
+    eixo_categoria = dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5))
+
+    if horizontal:
+        fig = px.bar(dados, x=coluna, y=categoria_col, orientation="h")
+        fig.update_traces(
+            marker_color=cores, marker_line_width=0, text=rotulos, textposition="outside",
+            hovertemplate="<b>%{y}</b><br>%{text}<extra></extra>",
+        )
+        fig.update_layout(xaxis=eixo_valor, yaxis=eixo_categoria)
+    else:
+        fig = px.bar(dados, x=categoria_col, y=coluna)
+        fig.update_traces(
+            marker_color=cores, marker_line_width=0, text=rotulos, textposition="outside",
+            hovertemplate="<b>%{x}</b><br>%{text}<extra></extra>",
+        )
+        fig.update_layout(xaxis=eixo_categoria, yaxis=eixo_valor)
+
+    fig.update_layout(
+        margin=dict(l=8, r=8, t=10, b=8),
+        height=altura,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=_FONTE_GRAFICOS,
+        showlegend=False,
+        bargap=0.35,
+        uniformtext_minsize=9,
+        uniformtext_mode="hide",
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def grafico_area(df, coluna, cor="#2563eb", altura=280):
+    """Renderiza um gráfico de área/linha com Plotly para séries temporais
+    (ex.: evolução mensal de Ordens de Serviço)."""
+    dados = df.reset_index()
+    categoria_col = dados.columns[0]
+
+    fig = px.area(dados, x=categoria_col, y=coluna)
+    fig.update_traces(
+        line=dict(color=cor, width=2.5),
+        fillcolor="rgba(37, 99, 235, 0.12)",
+        mode="lines+markers",
+        marker=dict(size=6, color=cor),
+        hovertemplate="<b>%{x}</b><br>%{y}<extra></extra>",
+    )
+    fig.update_layout(
+        margin=dict(l=8, r=8, t=10, b=8),
+        height=altura,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=_FONTE_GRAFICOS,
+        xaxis=dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5)),
+        yaxis=dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 @st.dialog("Nova Ordem de Serviço")
@@ -876,7 +985,10 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
+<<<<<<< HEAD
+=======
 
+>>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina == "maquinas":
             st.markdown(
                 '<div class="topbar-sub">Cadastro completo dos equipamentos, integrado a Modelos_Maquinas e Setores.</div>',
@@ -921,7 +1033,7 @@ if st.session_state.logged_in:
                         .reset_index(name="Quantidade")
                         .set_index("Status")
                     )
-                    st.bar_chart(df_status, y="Quantidade")
+                    grafico_barras(df_status, "Quantidade", cores_mapa=STATUS_MAQUINA_CORES)
                 else:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -935,7 +1047,7 @@ if st.session_state.logged_in:
                         .reset_index(name="Quantidade")
                         .set_index("Setor")
                     )
-                    st.bar_chart(df_setor, y="Quantidade")
+                    grafico_barras(df_setor, "Quantidade", cor_padrao="#2563eb", horizontal=True)
                 else:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1021,11 +1133,11 @@ if st.session_state.logged_in:
                 df_setores = pd.DataFrame(setores).set_index("nome_setor")
                 with g1:
                     st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por setor</div>', unsafe_allow_html=True)
-                    st.bar_chart(df_setores, y="total_maquinas")
+                    grafico_barras(df_setores, "total_maquinas", cor_padrao="#2563eb", horizontal=True)
                     st.markdown("</div>", unsafe_allow_html=True)
                 with g2:
                     st.markdown('<div class="chart-card"><div class="chart-title">Equipe ativa por setor</div>', unsafe_allow_html=True)
-                    st.bar_chart(df_setores, y="total_usuarios")
+                    grafico_barras(df_setores, "total_usuarios", cor_padrao="#16a34a", horizontal=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
             st.stop()
@@ -1071,12 +1183,12 @@ if st.session_state.logged_in:
                 with g1:
                     st.markdown('<div class="chart-card"><div class="chart-title">Top 10 peças por valor em estoque (R$)</div>', unsafe_allow_html=True)
                     df_top_valor = df_pecas.sort_values("valor_total", ascending=False).head(10).set_index("nome_peca")
-                    st.bar_chart(df_top_valor, y="valor_total")
+                    grafico_barras(df_top_valor, "valor_total", cor_padrao="#2563eb", moeda=True, horizontal=True)
                     st.markdown("</div>", unsafe_allow_html=True)
                 with g2:
                     st.markdown('<div class="chart-card"><div class="chart-title">Top 10 peças por quantidade em estoque</div>', unsafe_allow_html=True)
                     df_top_qtd = df_pecas.sort_values("quantidade_estoque", ascending=False).head(10).set_index("nome_peca")
-                    st.bar_chart(df_top_qtd, y="quantidade_estoque")
+                    grafico_barras(df_top_qtd, "quantidade_estoque", cor_padrao="#0ea5e9", horizontal=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
             with st.container(key="topbar_search"):
@@ -1161,7 +1273,7 @@ if st.session_state.logged_in:
                     .reset_index(name="Quantidade")
                     .set_index("Status")
                 )
-                st.bar_chart(df_ferr_status, y="Quantidade")
+                grafico_barras(df_ferr_status, "Quantidade", cores_mapa=STATUS_FERRAMENTA_CORES)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             with st.container(key="topbar_search"):
@@ -1241,7 +1353,7 @@ if st.session_state.logged_in:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown('<div class="chart-card"><div class="chart-title">Riscos mais recorrentes nas Ordens de Serviço</div>', unsafe_allow_html=True)
                 df_riscos = pd.DataFrame(riscos).sort_values("total_os", ascending=False).set_index("risco_nr01")
-                st.bar_chart(df_riscos, y="total_os")
+                grafico_barras(df_riscos, "total_os", cor_padrao="#dc2626", horizontal=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             st.stop()
@@ -1292,7 +1404,7 @@ if st.session_state.logged_in:
                         df_usuarios["cargo_usuario"].value_counts()
                         .rename_axis("Cargo").reset_index(name="Quantidade").set_index("Cargo")
                     )
-                    st.bar_chart(df_cargo, y="Quantidade")
+                    grafico_barras(df_cargo, "Quantidade", cor_padrao="#2563eb")
                     st.markdown("</div>", unsafe_allow_html=True)
                 with g2:
                     st.markdown('<div class="chart-card"><div class="chart-title">Disponibilidade dos técnicos</div>', unsafe_allow_html=True)
@@ -1302,7 +1414,7 @@ if st.session_state.logged_in:
                             df_tecnicos["disponibilidade_tecnico"].value_counts()
                             .rename_axis("Disponibilidade").reset_index(name="Quantidade").set_index("Disponibilidade")
                         )
-                        st.bar_chart(df_disp, y="Quantidade")
+                        grafico_barras(df_disp, "Quantidade", cores_mapa=DISPONIBILIDADE_CORES)
                     else:
                         st.caption("Nenhum técnico cadastrado.")
                     st.markdown("</div>", unsafe_allow_html=True)
@@ -1433,7 +1545,7 @@ if st.session_state.logged_in:
                         .reset_index(name="Quantidade")
                         .set_index("Status")
                     )
-                    st.bar_chart(df_os_status, y="Quantidade")
+                    grafico_barras(df_os_status, "Quantidade", cores_mapa=STATUS_OS_CORES)
                 else:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1449,7 +1561,7 @@ if st.session_state.logged_in:
                         .sort_values("Mês")
                         .set_index("Mês")
                     )
-                    st.bar_chart(df_os_mes, y="Quantidade")
+                    grafico_area(df_os_mes, "Quantidade")
                 else:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1466,7 +1578,7 @@ if st.session_state.logged_in:
                         .reset_index(name="Quantidade")
                         .set_index("Técnico")
                     )
-                    st.bar_chart(df_pend, y="Quantidade")
+                    grafico_barras(df_pend, "Quantidade", cor_padrao="#2563eb", horizontal=True)
                 else:
                     st.caption("Nenhuma OS pendente com técnico atribuído.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1480,7 +1592,7 @@ if st.session_state.logged_in:
                         .reset_index(name="Quantidade")
                         .set_index("Status")
                     )
-                    st.bar_chart(df_maq_status, y="Quantidade")
+                    grafico_barras(df_maq_status, "Quantidade", cores_mapa=STATUS_MAQUINA_CORES)
                 else:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1662,7 +1774,7 @@ if st.session_state.logged_in:
                         df_filtro["status_os"].value_counts()
                         .rename_axis("Status").reset_index(name="Quantidade").set_index("Status")
                     )
-                    st.bar_chart(df_status_rel, y="Quantidade")
+                    grafico_barras(df_status_rel, "Quantidade", cores_mapa=STATUS_OS_CORES)
                 else:
                     st.caption("Sem dados para o período/técnico selecionado.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1673,7 +1785,7 @@ if st.session_state.logged_in:
                         df_filtro["tecnico"].dropna().value_counts()
                         .rename_axis("Técnico").reset_index(name="Quantidade").set_index("Técnico")
                     )
-                    st.bar_chart(df_tec_rel, y="Quantidade")
+                    grafico_barras(df_tec_rel, "Quantidade", cor_padrao="#2563eb", horizontal=True)
                 else:
                     st.caption("Sem dados para o período/técnico selecionado.")
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -1687,7 +1799,7 @@ if st.session_state.logged_in:
                     .rename_axis("Mês").reset_index(name="Quantidade")
                     .sort_values("Mês").set_index("Mês")
                 )
-                st.bar_chart(df_mensal, y="Quantidade")
+                grafico_area(df_mensal, "Quantidade")
             else:
                 st.caption("Sem dados para o período/técnico selecionado.")
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1716,7 +1828,10 @@ if st.session_state.logged_in:
 
             st.stop()
 
+<<<<<<< HEAD
+=======
 
+>>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
             st.info("Em construção — por enquanto Ordens de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
