@@ -1,6 +1,10 @@
 import hashlib
+<<<<<<< Updated upstream
 import textwrap
 from datetime import datetime
+=======
+from datetime import datetime, timedelta
+>>>>>>> Stashed changes
 from zoneinfo import ZoneInfo
 import pymysql
 import streamlit as st
@@ -574,6 +578,848 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
+<<<<<<< Updated upstream
+=======
+        if st.session_state.pagina == "maquinas":
+            st.markdown(
+                '<div class="topbar-sub">Cadastro completo dos equipamentos, integrado a Modelos_Maquinas e Setores.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                todas_maquinas = listar_maquinas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as máquinas: {e}")
+                todas_maquinas = []
+
+            total = len(todas_maquinas)
+            operando = sum(1 for m in todas_maquinas if m["status_operacional"] == "Operando")
+            parado = sum(1 for m in todas_maquinas if m["status_operacional"] == "Parado")
+            manutencao = sum(1 for m in todas_maquinas if m["status_operacional"] == "Em Manutenção")
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total}</div>'
+                f'<div class="kpi-label">Total de máquinas</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{operando}</div>'
+                f'<div class="kpi-label">Operando</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{parado}</div>'
+                f'<div class="kpi-label">Parado</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{manutencao}</div>'
+                f'<div class="kpi-label">Em manutenção</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por status operacional</div>', unsafe_allow_html=True)
+                if todas_maquinas:
+                    df_status = (
+                        pd.DataFrame(todas_maquinas)["status_operacional"]
+                        .value_counts()
+                        .rename_axis("Status")
+                        .reset_index(name="Quantidade")
+                        .set_index("Status")
+                    )
+                    st.bar_chart(df_status, y="Quantidade")
+                else:
+                    st.caption("Sem dados para exibir.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with g2:
+                st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por setor</div>', unsafe_allow_html=True)
+                if todas_maquinas:
+                    df_setor = (
+                        pd.DataFrame(todas_maquinas)["nome_setor"]
+                        .value_counts()
+                        .rename_axis("Setor")
+                        .reset_index(name="Quantidade")
+                        .set_index("Setor")
+                    )
+                    st.bar_chart(df_setor, y="Quantidade")
+                else:
+                    st.caption("Sem dados para exibir.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.container(key="topbar_search"):
+                st.text_input(
+                    "Buscar",
+                    key="maquinas_busca",
+                    placeholder="Buscar tag, máquina, fabricante, localização ou setor...",
+                    label_visibility="collapsed",
+                )
+
+            try:
+                maquinas = listar_maquinas(st.session_state.get("maquinas_busca", ""))
+            except Exception as e:
+                st.error(f"Não foi possível carregar as máquinas: {e}")
+                maquinas = []
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if not maquinas:
+                st.info("Nenhuma máquina encontrada.")
+            else:
+                h1, h2, h3, h4, h5, h6, h7 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1])
+                for col, texto in zip((h1, h2, h3, h4, h5, h6, h7),
+                                       ("Tag", "Máquina / Modelo", "Fabricante", "Localização", "Setor", "Manutenção", "Status")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+
+                for row in maquinas:
+                    with st.container(key=f"maq_row_{row['tag_equipamento']}"):
+                        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1])
+                        c1.markdown(f'<div class="os-cell"><b>{row["tag_equipamento"]}</b></div>', unsafe_allow_html=True)
+                        c2.markdown(
+                            f'<div class="os-cell">{row["nome_maquina"]}</div>'
+                            f'<div class="os-cell-muted">{row["nome_modelo"]} · {row["numero_serie"]}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        c3.markdown(f'<div class="os-cell">{row["fabricante_maquina"]}</div>', unsafe_allow_html=True)
+                        c4.markdown(f'<div class="os-cell">{row["localizacao_maquina"]}</div>', unsafe_allow_html=True)
+                        c5.markdown(f'<div class="os-cell">{row["nome_setor"]}</div>', unsafe_allow_html=True)
+                        c6.markdown(
+                            f'<div class="os-cell">{row["tipo_manutencao_padrao"]}</div>'
+                            f'<div class="os-cell-muted">Última: {row["ultima_manutencao"] or "—"}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        slug = status_slug(row["status_operacional"])
+                        c7.markdown(f'<span class="status-badge status-{slug}">{row["status_operacional"]}</span>', unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "setores":
+            st.markdown(
+                '<div class="topbar-sub">Setores cadastrados, com máquinas e equipe ativa vinculadas.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                setores = listar_setores()
+            except Exception as e:
+                st.error(f"Não foi possível carregar os setores: {e}")
+                setores = []
+
+            if not setores:
+                st.info("Nenhum setor cadastrado.")
+            else:
+                colunas = st.columns(3)
+                for idx, s in enumerate(setores):
+                    with colunas[idx % 3]:
+                        st.markdown(f"""
+<div class="setor-card">
+<div class="setor-card-title">🏭 {s["nome_setor"]}</div>
+<div class="setor-card-desc">{s["descricao_setor"] or "Sem descrição cadastrada."}</div>
+<div class="setor-card-stats">
+<div><div class="setor-stat-value">{s["total_maquinas"]}</div><div class="setor-stat-label">MÁQUINAS</div></div>
+<div><div class="setor-stat-value">{s["total_usuarios"]}</div><div class="setor-stat-label">EQUIPE ATIVA</div></div>
+</div>
+</div>
+""", unsafe_allow_html=True)
+                        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                g1, g2 = st.columns(2)
+                df_setores = pd.DataFrame(setores).set_index("nome_setor")
+                with g1:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por setor</div>', unsafe_allow_html=True)
+                    st.bar_chart(df_setores, y="total_maquinas")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with g2:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Equipe ativa por setor</div>', unsafe_allow_html=True)
+                    st.bar_chart(df_setores, y="total_usuarios")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "almoxarifado":
+            st.markdown(
+                '<div class="topbar-sub">Itens em estoque, valores e disponibilidade de peças para as OS.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                todas_pecas = listar_pecas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar o almoxarifado: {e}")
+                todas_pecas = []
+
+            LIMITE_ESTOQUE_BAIXO = 10
+            total_itens = len(todas_pecas)
+            valor_total = sum(p["valor_total"] for p in todas_pecas) if todas_pecas else 0
+            estoque_baixo = sum(1 for p in todas_pecas if p["quantidade_estoque"] < LIMITE_ESTOQUE_BAIXO)
+            total_unidades = sum(p["quantidade_estoque"] for p in todas_pecas) if todas_pecas else 0
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total_itens}</div>'
+                f'<div class="kpi-label">Itens cadastrados</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{total_unidades}</div>'
+                f'<div class="kpi-label">Unidades em estoque</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">R$ {valor_total:,.2f}</div>'
+                f'<div class="kpi-label">Valor total em estoque</div></div>'.replace(",", "§").replace(".", ",").replace("§", "."),
+                unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{estoque_baixo}</div>'
+                f'<div class="kpi-label">Itens com estoque baixo (&lt;{LIMITE_ESTOQUE_BAIXO})</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if todas_pecas:
+                df_pecas = pd.DataFrame(todas_pecas)
+                g1, g2 = st.columns(2)
+                with g1:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Top 10 peças por valor em estoque (R$)</div>', unsafe_allow_html=True)
+                    df_top_valor = df_pecas.sort_values("valor_total", ascending=False).head(10).set_index("nome_peca")
+                    st.bar_chart(df_top_valor, y="valor_total")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with g2:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Top 10 peças por quantidade em estoque</div>', unsafe_allow_html=True)
+                    df_top_qtd = df_pecas.sort_values("quantidade_estoque", ascending=False).head(10).set_index("nome_peca")
+                    st.bar_chart(df_top_qtd, y="quantidade_estoque")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.container(key="topbar_search"):
+                st.text_input(
+                    "Buscar",
+                    key="pecas_busca",
+                    placeholder="Buscar peça pelo nome...",
+                    label_visibility="collapsed",
+                )
+
+            try:
+                pecas = listar_pecas(st.session_state.get("pecas_busca", ""))
+            except Exception as e:
+                st.error(f"Não foi possível carregar o almoxarifado: {e}")
+                pecas = []
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if not pecas:
+                st.info("Nenhuma peça encontrada.")
+            else:
+                h1, h2, h3, h4, h5 = st.columns([2.6, 1.2, 1.2, 1.3, 1.3])
+                for col, texto in zip((h1, h2, h3, h4, h5),
+                                       ("Peça", "Qtd. em estoque", "Unidade", "Custo unitário", "Valor total")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+
+                for row in pecas:
+                    with st.container(key=f"peca_row_{row['id_peca']}"):
+                        c1, c2, c3, c4, c5 = st.columns([2.6, 1.2, 1.2, 1.3, 1.3])
+                        c1.markdown(f'<div class="os-cell"><b>{row["nome_peca"]}</b></div>', unsafe_allow_html=True)
+                        classe_qtd = "estoque-baixo" if row["quantidade_estoque"] < LIMITE_ESTOQUE_BAIXO else "estoque-ok"
+                        c2.markdown(f'<div class="os-cell {classe_qtd}">{row["quantidade_estoque"]}</div>', unsafe_allow_html=True)
+                        c3.markdown(f'<div class="os-cell">{row["unidade_medida"]}</div>', unsafe_allow_html=True)
+                        c4.markdown(f'<div class="os-cell">R$ {row["custo_unitario"]:,.2f}</div>'.replace(",", "§").replace(".", ",").replace("§", "."), unsafe_allow_html=True)
+                        c5.markdown(f'<div class="os-cell">R$ {row["valor_total"]:,.2f}</div>'.replace(",", "§").replace(".", ",").replace("§", "."), unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "ferramentas":
+            st.markdown(
+                '<div class="topbar-sub">Situação das ferramentas e com quem cada uma está no momento.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                todas_ferramentas = listar_ferramentas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as ferramentas: {e}")
+                todas_ferramentas = []
+
+            total = len(todas_ferramentas)
+            disponiveis = sum(1 for f in todas_ferramentas if f["status_ferramenta"] == "Disponível")
+            em_uso = sum(1 for f in todas_ferramentas if f["status_ferramenta"] == "Em Uso")
+            manutencao = sum(1 for f in todas_ferramentas if f["status_ferramenta"] == "Manutenção/Calibração")
+            extraviadas = sum(1 for f in todas_ferramentas if f["status_ferramenta"] == "Extraviada")
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total}</div>'
+                f'<div class="kpi-label">Total de ferramentas</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{disponiveis}</div>'
+                f'<div class="kpi-label">Disponíveis</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{em_uso}</div>'
+                f'<div class="kpi-label">Em uso</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card" style="border-left-color:#6d28d9;"><div class="kpi-value">{manutencao}</div>'
+                f'<div class="kpi-label">Manutenção / Calibração</div></div>', unsafe_allow_html=True)
+            k5.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{extraviadas}</div>'
+                f'<div class="kpi-label">Extraviadas</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if todas_ferramentas:
+                st.markdown('<div class="chart-card"><div class="chart-title">Ferramentas por status</div>', unsafe_allow_html=True)
+                df_ferr_status = (
+                    pd.DataFrame(todas_ferramentas)["status_ferramenta"]
+                    .value_counts()
+                    .rename_axis("Status")
+                    .reset_index(name="Quantidade")
+                    .set_index("Status")
+                )
+                st.bar_chart(df_ferr_status, y="Quantidade")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.container(key="topbar_search"):
+                st.text_input(
+                    "Buscar",
+                    key="ferramentas_busca",
+                    placeholder="Buscar ferramenta pelo nome...",
+                    label_visibility="collapsed",
+                )
+
+            try:
+                ferramentas = listar_ferramentas(st.session_state.get("ferramentas_busca", ""))
+            except Exception as e:
+                st.error(f"Não foi possível carregar as ferramentas: {e}")
+                ferramentas = []
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if not ferramentas:
+                st.info("Nenhuma ferramenta encontrada.")
+            else:
+                h1, h2, h3, h4 = st.columns([2.6, 1.4, 1.6, 1.6])
+                for col, texto in zip((h1, h2, h3, h4), ("Ferramenta", "Status", "Com quem", "Devolução prevista")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+
+                for row in ferramentas:
+                    with st.container(key=f"ferr_row_{row['id_ferramenta']}"):
+                        c1, c2, c3, c4 = st.columns([2.6, 1.4, 1.6, 1.6])
+                        c1.markdown(f'<div class="os-cell"><b>{row["nome_ferramenta"]}</b></div>', unsafe_allow_html=True)
+                        slug = status_slug(row["status_ferramenta"])
+                        c2.markdown(f'<span class="status-badge status-{slug}">{row["status_ferramenta"]}</span>', unsafe_allow_html=True)
+                        c3.markdown(f'<div class="os-cell">{row["com_quem"] or "—"}</div>', unsafe_allow_html=True)
+                        c4.markdown(f'<div class="os-cell">{row["devolucao_prevista"] or "—"}</div>', unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "matriz_risco":
+            st.markdown(
+                '<div class="topbar-sub">Matriz de Riscos (NR-01) e EPIs obrigatórios associados às Ordens de Serviço.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                riscos = listar_riscos()
+            except Exception as e:
+                st.error(f"Não foi possível carregar a matriz de riscos: {e}")
+                riscos = []
+
+            if not riscos:
+                st.info("Nenhum risco cadastrado.")
+            else:
+                total_riscos = len(riscos)
+                mais_usado = max(riscos, key=lambda r: r["total_os"]) if riscos else None
+
+                k1, k2 = st.columns(2)
+                k1.markdown(
+                    f'<div class="kpi-card"><div class="kpi-value">{total_riscos}</div>'
+                    f'<div class="kpi-label">Riscos cadastrados</div></div>', unsafe_allow_html=True)
+                k2.markdown(
+                    f'<div class="kpi-card kpi-red"><div class="kpi-value">{mais_usado["risco_nr01"] if mais_usado else "—"}</div>'
+                    f'<div class="kpi-label">Risco mais recorrente nas OS</div></div>', unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                colunas = st.columns(3)
+                for idx, r in enumerate(riscos):
+                    with colunas[idx % 3]:
+                        st.markdown(f"""
+<div class="risco-card">
+<div class="risco-card-title">⚠️ {r["risco_nr01"]}</div>
+<div class="risco-card-epis"><b>EPIs obrigatórios:</b> {r["epis_obrigatorios"]}</div>
+<span class="risco-card-tag">{r["total_os"]} OS vinculada(s)</span>
+</div>
+""", unsafe_allow_html=True)
+                        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown('<div class="chart-card"><div class="chart-title">Riscos mais recorrentes nas Ordens de Serviço</div>', unsafe_allow_html=True)
+                df_riscos = pd.DataFrame(riscos).sort_values("total_os", ascending=False).set_index("risco_nr01")
+                st.bar_chart(df_riscos, y="total_os")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "usuarios":
+            st.markdown(
+                '<div class="topbar-sub">Equipe cadastrada, cargos, setores e disponibilidade dos técnicos.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                todos_usuarios = listar_usuarios()
+            except Exception as e:
+                st.error(f"Não foi possível carregar os usuários: {e}")
+                todos_usuarios = []
+
+            total = len(todos_usuarios)
+            ativos = sum(1 for u in todos_usuarios if u["status_usuario"] == "Ativo")
+            inativos = sum(1 for u in todos_usuarios if u["status_usuario"] == "Inativo")
+            tecnicos_disponiveis = sum(
+                1 for u in todos_usuarios
+                if u["cargo_usuario"] == "Tecnico" and u["status_usuario"] == "Ativo"
+                and u["disponibilidade_tecnico"] == "Disponível"
+            )
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total}</div>'
+                f'<div class="kpi-label">Usuários cadastrados</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{ativos}</div>'
+                f'<div class="kpi-label">Ativos</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{inativos}</div>'
+                f'<div class="kpi-label">Inativos</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{tecnicos_disponiveis}</div>'
+                f'<div class="kpi-label">Técnicos disponíveis agora</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if todos_usuarios:
+                df_usuarios = pd.DataFrame(todos_usuarios)
+                g1, g2 = st.columns(2)
+                with g1:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Usuários por cargo</div>', unsafe_allow_html=True)
+                    df_cargo = (
+                        df_usuarios["cargo_usuario"].value_counts()
+                        .rename_axis("Cargo").reset_index(name="Quantidade").set_index("Cargo")
+                    )
+                    st.bar_chart(df_cargo, y="Quantidade")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                with g2:
+                    st.markdown('<div class="chart-card"><div class="chart-title">Disponibilidade dos técnicos</div>', unsafe_allow_html=True)
+                    df_tecnicos = df_usuarios[df_usuarios["cargo_usuario"] == "Tecnico"]
+                    if not df_tecnicos.empty:
+                        df_disp = (
+                            df_tecnicos["disponibilidade_tecnico"].value_counts()
+                            .rename_axis("Disponibilidade").reset_index(name="Quantidade").set_index("Disponibilidade")
+                        )
+                        st.bar_chart(df_disp, y="Quantidade")
+                    else:
+                        st.caption("Nenhum técnico cadastrado.")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            with st.container(key="topbar_search"):
+                st.text_input(
+                    "Buscar",
+                    key="usuarios_busca",
+                    placeholder="Buscar por nome, e-mail, cargo ou setor...",
+                    label_visibility="collapsed",
+                )
+
+            try:
+                usuarios = listar_usuarios(st.session_state.get("usuarios_busca", ""))
+            except Exception as e:
+                st.error(f"Não foi possível carregar os usuários: {e}")
+                usuarios = []
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            if not usuarios:
+                st.info("Nenhum usuário encontrado.")
+            else:
+                h1, h2, h3, h4, h5, h6 = st.columns([2.2, 1.4, 1.4, 1.1, 1.4, 1.3])
+                for col, texto in zip((h1, h2, h3, h4, h5, h6),
+                                       ("Usuário", "Cargo", "Setor", "Status", "Disponibilidade", "Telefone")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+
+                for row in usuarios:
+                    with st.container(key=f"user_row_{row['id_usuario']}"):
+                        c1, c2, c3, c4, c5, c6 = st.columns([2.2, 1.4, 1.4, 1.1, 1.4, 1.3])
+                        iniciais = "".join(p[0].upper() for p in row["nome_usuario"].split()[:2])
+                        c1.markdown(
+                            f'<div class="user-name-cell"><div class="user-avatar">{iniciais}</div>'
+                            f'<div><div class="os-cell"><b>{row["nome_usuario"]}</b></div>'
+                            f'<div class="os-cell-muted">{row["email_usuario"]}</div></div></div>',
+                            unsafe_allow_html=True,
+                        )
+                        c2.markdown(
+                            f'<div class="os-cell">{row["cargo_usuario"]}</div>'
+                            f'<div class="os-cell-muted">{row["nivel_experiencia"] or "—"}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        c3.markdown(f'<div class="os-cell">{row["nome_setor"] or "—"}</div>', unsafe_allow_html=True)
+                        slug_status = status_slug(row["status_usuario"])
+                        c4.markdown(f'<span class="status-badge status-{slug_status}">{row["status_usuario"]}</span>', unsafe_allow_html=True)
+                        if row["cargo_usuario"] == "Tecnico" and row["disponibilidade_tecnico"]:
+                            slug_disp = status_slug(row["disponibilidade_tecnico"])
+                            c5.markdown(f'<span class="status-badge status-{slug_disp}">{row["disponibilidade_tecnico"]}</span>', unsafe_allow_html=True)
+                        else:
+                            c5.markdown('<div class="os-cell-muted">—</div>', unsafe_allow_html=True)
+                        c6.markdown(f'<div class="os-cell">{row["telefone_usuario"]}</div>', unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "dashboard":
+            st.markdown(
+                '<div class="topbar-sub">Visão geral da operação: ordens de serviço, ativos, equipe e estoque.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                ordens_dash = listar_ordens_servico()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                ordens_dash = []
+            try:
+                maquinas_dash = listar_maquinas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as máquinas: {e}")
+                maquinas_dash = []
+            try:
+                pecas_dash = listar_pecas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar o almoxarifado: {e}")
+                pecas_dash = []
+            try:
+                usuarios_dash = listar_usuarios()
+            except Exception as e:
+                st.error(f"Não foi possível carregar os usuários: {e}")
+                usuarios_dash = []
+
+            LIMITE_ESTOQUE_BAIXO = 10
+
+            total_os = len(ordens_dash)
+            os_abertas = sum(1 for o in ordens_dash if o["status_os"] == "Aberto")
+            os_andamento = sum(1 for o in ordens_dash if o["status_os"] == "Em andamento")
+            os_concluidas = sum(1 for o in ordens_dash if o["status_os"] == "Concluído")
+
+            total_maquinas = len(maquinas_dash)
+            maquinas_paradas = sum(1 for m in maquinas_dash if m["status_operacional"] == "Parado")
+
+            itens_estoque_baixo = sum(1 for p in pecas_dash if p["quantidade_estoque"] < LIMITE_ESTOQUE_BAIXO)
+
+            tecnicos_disponiveis = sum(
+                1 for u in usuarios_dash
+                if u["cargo_usuario"] == "Tecnico" and u["status_usuario"] == "Ativo"
+                and u["disponibilidade_tecnico"] == "Disponível"
+            )
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total_os}</div>'
+                f'<div class="kpi-label">OS no total</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{os_abertas}</div>'
+                f'<div class="kpi-label">OS em aberto</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{os_andamento}</div>'
+                f'<div class="kpi-label">OS em andamento</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{os_concluidas}</div>'
+                f'<div class="kpi-label">OS concluídas</div></div>', unsafe_allow_html=True)
+            k5.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{maquinas_paradas}</div>'
+                f'<div class="kpi-label">Máquinas paradas</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown('<div class="chart-card"><div class="chart-title">Ordens de Serviço por status</div>', unsafe_allow_html=True)
+                if ordens_dash:
+                    df_os_status = (
+                        pd.DataFrame(ordens_dash)["status_os"]
+                        .value_counts()
+                        .rename_axis("Status")
+                        .reset_index(name="Quantidade")
+                        .set_index("Status")
+                    )
+                    st.bar_chart(df_os_status, y="Quantidade")
+                else:
+                    st.caption("Sem dados para exibir.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with g2:
+                st.markdown('<div class="chart-card"><div class="chart-title">Abertura de OS por mês</div>', unsafe_allow_html=True)
+                if ordens_dash:
+                    df_os_mes = pd.DataFrame(ordens_dash)
+                    df_os_mes["mes"] = pd.to_datetime(df_os_mes["data_abertura"].astype(str)).dt.to_period("M").astype(str)
+                    df_os_mes = (
+                        df_os_mes["mes"].value_counts()
+                        .rename_axis("Mês")
+                        .reset_index(name="Quantidade")
+                        .sort_values("Mês")
+                        .set_index("Mês")
+                    )
+                    st.bar_chart(df_os_mes, y="Quantidade")
+                else:
+                    st.caption("Sem dados para exibir.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            g3, g4 = st.columns(2)
+            with g3:
+                st.markdown('<div class="chart-card"><div class="chart-title">OS em aberto/andamento por técnico</div>', unsafe_allow_html=True)
+                pendentes = [o for o in ordens_dash if o["status_os"] in ("Aberto", "Em andamento") and o["tecnico"]]
+                if pendentes:
+                    df_pend = (
+                        pd.DataFrame(pendentes)["tecnico"]
+                        .value_counts()
+                        .rename_axis("Técnico")
+                        .reset_index(name="Quantidade")
+                        .set_index("Técnico")
+                    )
+                    st.bar_chart(df_pend, y="Quantidade")
+                else:
+                    st.caption("Nenhuma OS pendente com técnico atribuído.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with g4:
+                st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por status operacional</div>', unsafe_allow_html=True)
+                if maquinas_dash:
+                    df_maq_status = (
+                        pd.DataFrame(maquinas_dash)["status_operacional"]
+                        .value_counts()
+                        .rename_axis("Status")
+                        .reset_index(name="Quantidade")
+                        .set_index("Status")
+                    )
+                    st.bar_chart(df_maq_status, y="Quantidade")
+                else:
+                    st.caption("Sem dados para exibir.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            alerta_col1, alerta_col2 = st.columns(2)
+            alerta_col1.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{itens_estoque_baixo}</div>'
+                f'<div class="kpi-label">Itens do almoxarifado com estoque baixo</div></div>', unsafe_allow_html=True)
+            alerta_col2.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{tecnicos_disponiveis}</div>'
+                f'<div class="kpi-label">Técnicos disponíveis agora</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="chart-card"><div class="chart-title">Últimas Ordens de Serviço</div>', unsafe_allow_html=True)
+            if ordens_dash:
+                ultimas = ordens_dash[:6]
+                h1, h2, h3, h4, h5 = st.columns([0.6, 1.2, 2.6, 1.3, 1])
+                for col, texto in zip((h1, h2, h3, h4, h5), ("OS", "Equipamento", "Descrição", "Técnico", "Status")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+                for row in ultimas:
+                    c1, c2, c3, c4, c5 = st.columns([0.6, 1.2, 2.6, 1.3, 1])
+                    c1.markdown(f'<div class="os-cell">#{row["id_os"]}</div>', unsafe_allow_html=True)
+                    c2.markdown(f'<div class="os-cell">{row["tag_equipamento"]}</div>', unsafe_allow_html=True)
+                    c3.markdown(f'<div class="os-cell">{row["descricao_falha"]}</div>', unsafe_allow_html=True)
+                    c4.markdown(f'<div class="os-cell">{row["tecnico"] or "—"}</div>', unsafe_allow_html=True)
+                    slug = status_slug(row["status_os"])
+                    c5.markdown(f'<span class="status-badge status-{slug}">{row["status_os"]}</span>', unsafe_allow_html=True)
+            else:
+                st.caption("Nenhuma OS cadastrada.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.stop()
+
+        if st.session_state.pagina == "agenda":
+            st.markdown(
+                '<div class="topbar-sub">Programação das Ordens de Serviço por data e técnico.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                ordens_agenda = listar_ordens_servico()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                ordens_agenda = []
+
+            hoje = agora_brasil().date()
+
+            f1, f2 = st.columns([1, 3])
+            with f1:
+                data_selecionada = st.date_input("Ver ordens do dia", value=hoje, key="agenda_data")
+
+            os_do_dia = [o for o in ordens_agenda if o["data_abertura"] == data_selecionada]
+            os_do_dia.sort(key=lambda o: (o["hh_inicio"] is None, o["hh_inicio"]))
+
+            os_semana = [
+                o for o in ordens_agenda
+                if o["data_abertura"] and hoje <= o["data_abertura"] <= hoje + timedelta(days=7)
+            ]
+
+            k1, k2, k3 = st.columns(3)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{len(os_do_dia)}</div>'
+                f'<div class="kpi-label">OS na data selecionada</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{len(os_semana)}</div>'
+                f'<div class="kpi-label">OS nos próximos 7 dias</div></div>', unsafe_allow_html=True)
+            pendentes_total = sum(1 for o in ordens_agenda if o["status_os"] != "Concluído")
+            k3.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{pendentes_total}</div>'
+                f'<div class="kpi-label">OS pendentes no total</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            st.markdown(f'<div class="chart-title">Ordens de Serviço em {data_selecionada.strftime("%d/%m/%Y")}</div>', unsafe_allow_html=True)
+            if not os_do_dia:
+                st.info("Nenhuma OS agendada para esta data.")
+            else:
+                h1, h2, h3, h4, h5 = st.columns([1, 1.2, 2.4, 1.4, 1])
+                for col, texto in zip((h1, h2, h3, h4, h5), ("Horário", "Equipamento", "Descrição", "Técnico", "Status")):
+                    col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+                for row in os_do_dia:
+                    with st.container(key=f"agenda_row_{row['id_os']}"):
+                        c1, c2, c3, c4, c5 = st.columns([1, 1.2, 2.4, 1.4, 1])
+                        c1.markdown(
+                            f'<div class="os-cell">{row["hh_inicio"]} → {row["hh_fim"] or "—"}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        c2.markdown(f'<div class="os-cell"><b>{row["tag_equipamento"]}</b></div>', unsafe_allow_html=True)
+                        c3.markdown(f'<div class="os-cell">{row["descricao_falha"]}</div>', unsafe_allow_html=True)
+                        c4.markdown(f'<div class="os-cell">{row["tecnico"] or "—"}</div>', unsafe_allow_html=True)
+                        slug = status_slug(row["status_os"])
+                        c5.markdown(f'<span class="status-badge status-{slug}">{row["status_os"]}</span>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="chart-title">Próximos 7 dias</div>', unsafe_allow_html=True)
+            for i in range(7):
+                dia = hoje + timedelta(days=i)
+                os_dia = [o for o in ordens_agenda if o["data_abertura"] == dia]
+                with st.container(key=f"agenda_dia_{dia.isoformat()}"):
+                    st.markdown(
+                        f'<div class="os-row"><b>{dia.strftime("%d/%m/%Y")}</b> '
+                        f'<span class="os-cell-muted">— {len(os_dia)} OS</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.stop()
+
+        if st.session_state.pagina == "relatorios":
+            st.markdown(
+                '<div class="topbar-sub">Indicadores consolidados de manutenção, por período e por técnico.</div>',
+                unsafe_allow_html=True,
+            )
+
+            try:
+                ordens_rel = listar_ordens_servico()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                ordens_rel = []
+
+            if not ordens_rel:
+                st.info("Nenhuma OS cadastrada para gerar relatórios.")
+                st.stop()
+
+            df_os = pd.DataFrame(ordens_rel)
+            data_min = df_os["data_abertura"].min()
+            data_max = df_os["data_abertura"].max()
+
+            f1, f2 = st.columns(2)
+            with f1:
+                periodo = st.date_input(
+                    "Período",
+                    value=(data_min, data_max),
+                    min_value=data_min,
+                    max_value=data_max,
+                    key="relatorios_periodo",
+                )
+            with f2:
+                tecnicos_opcoes = ["Todos"] + sorted(df_os["tecnico"].dropna().unique().tolist())
+                tecnico_filtro = st.selectbox("Técnico", tecnicos_opcoes, key="relatorios_tecnico")
+
+            if isinstance(periodo, tuple) and len(periodo) == 2:
+                data_ini, data_fim = periodo
+            else:
+                data_ini, data_fim = data_min, data_max
+
+            df_filtro = df_os[(df_os["data_abertura"] >= data_ini) & (df_os["data_abertura"] <= data_fim)]
+            if tecnico_filtro != "Todos":
+                df_filtro = df_filtro[df_filtro["tecnico"] == tecnico_filtro]
+
+            total_periodo = len(df_filtro)
+            concluidas_periodo = int((df_filtro["status_os"] == "Concluído").sum())
+            abertas_periodo = int((df_filtro["status_os"] == "Aberto").sum())
+            andamento_periodo = int((df_filtro["status_os"] == "Em andamento").sum())
+            taxa_conclusao = (concluidas_periodo / total_periodo * 100) if total_periodo else 0
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{total_periodo}</div>'
+                f'<div class="kpi-label">OS no período</div></div>', unsafe_allow_html=True)
+            k2.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{concluidas_periodo}</div>'
+                f'<div class="kpi-label">Concluídas</div></div>', unsafe_allow_html=True)
+            k3.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{abertas_periodo + andamento_periodo}</div>'
+                f'<div class="kpi-label">Em aberto/andamento</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{taxa_conclusao:.1f}%</div>'
+                f'<div class="kpi-label">Taxa de conclusão</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown('<div class="chart-card"><div class="chart-title">OS por status (período filtrado)</div>', unsafe_allow_html=True)
+                if not df_filtro.empty:
+                    df_status_rel = (
+                        df_filtro["status_os"].value_counts()
+                        .rename_axis("Status").reset_index(name="Quantidade").set_index("Status")
+                    )
+                    st.bar_chart(df_status_rel, y="Quantidade")
+                else:
+                    st.caption("Sem dados para o período/técnico selecionado.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with g2:
+                st.markdown('<div class="chart-card"><div class="chart-title">OS por técnico (período filtrado)</div>', unsafe_allow_html=True)
+                if not df_filtro.empty and df_filtro["tecnico"].notna().any():
+                    df_tec_rel = (
+                        df_filtro["tecnico"].dropna().value_counts()
+                        .rename_axis("Técnico").reset_index(name="Quantidade").set_index("Técnico")
+                    )
+                    st.bar_chart(df_tec_rel, y="Quantidade")
+                else:
+                    st.caption("Sem dados para o período/técnico selecionado.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown('<div class="chart-card"><div class="chart-title">Evolução mensal de abertura de OS</div>', unsafe_allow_html=True)
+            if not df_filtro.empty:
+                df_mensal = df_filtro.copy()
+                df_mensal["mes"] = pd.to_datetime(df_mensal["data_abertura"].astype(str)).dt.to_period("M").astype(str)
+                df_mensal = (
+                    df_mensal["mes"].value_counts()
+                    .rename_axis("Mês").reset_index(name="Quantidade")
+                    .sort_values("Mês").set_index("Mês")
+                )
+                st.bar_chart(df_mensal, y="Quantidade")
+            else:
+                st.caption("Sem dados para o período/técnico selecionado.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="chart-title">Detalhamento das Ordens de Serviço</div>', unsafe_allow_html=True)
+            if df_filtro.empty:
+                st.info("Nenhuma OS encontrada para os filtros selecionados.")
+            else:
+                st.dataframe(
+                    df_filtro[["id_os", "tag_equipamento", "descricao_falha", "data_abertura", "tecnico", "status_os"]]
+                    .rename(columns={
+                        "id_os": "OS", "tag_equipamento": "Equipamento", "descricao_falha": "Descrição",
+                        "data_abertura": "Abertura", "tecnico": "Técnico", "status_os": "Status",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                csv_bytes = df_filtro.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ Exportar CSV",
+                    data=csv_bytes,
+                    file_name=f"relatorio_os_{data_ini}_{data_fim}.csv",
+                    mime="text/csv",
+                )
+
+            st.stop()
+
+>>>>>>> Stashed changes
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
             st.info("Em construção — por enquanto só a tela de Ordens de Serviço está conectada ao banco.")
