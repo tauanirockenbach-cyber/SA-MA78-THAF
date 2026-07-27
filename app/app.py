@@ -3,6 +3,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.express as px
+import textwrap
+from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import pandas as pd
 import pymysql
 import streamlit as st
 
@@ -980,6 +985,10 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina == "maquinas":
             st.markdown(
                 '<div class="topbar-sub">Cadastro completo dos equipamentos, integrado a Modelos_Maquinas e Setores.</div>',
@@ -1819,6 +1828,10 @@ if st.session_state.logged_in:
 
             st.stop()
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
             st.info("Em construção — por enquanto Ordens de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
