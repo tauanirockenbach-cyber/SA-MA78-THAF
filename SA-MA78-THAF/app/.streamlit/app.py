@@ -1,15 +1,20 @@
 import hashlib
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 import pandas as pd
 import plotly.express as px
 import textwrap
-from datetime import datetime
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-import pandas as pd
 import pymysql
 import streamlit as st
+from dbutils.pooled_db import PooledDB
+
+try:
+    from googleapiclient.discovery import build as _google_build
+    from google.oauth2 import service_account as _google_service_account
+    GOOGLE_CALENDAR_LIB_OK = True
+except ImportError:
+    GOOGLE_CALENDAR_LIB_OK = False
 
 FUSO_BRASIL = ZoneInfo("America/Sao_Paulo")
 
@@ -47,8 +52,233 @@ def hash_senha(senha: str) -> str:
     return hashlib.sha1(senha.encode("utf-8")).hexdigest()
 
 
-def get_connection():
-    return pymysql.connect(
+# ------------------------------------------------------------------
+# INTEGRAÇÃO COM O GOOGLE CALENDAR (conta de serviço, calendário único
+# compartilhado da empresa — sem login individual por usuário)
+#
+# Configuração necessária em .streamlit/secrets.toml:
+#
+#   [google_calendar]
+#   calendar_id = "algumacoisa@group.calendar.google.com"
+#   service_account_json = """
+#   { ... conteúdo do JSON da conta de serviço baixado no Google Cloud ... }
+#   """
+#
+# Passos no Google Cloud: criar um projeto, ativar a "Google Calendar API",
+# criar uma conta de serviço, gerar uma chave JSON, e por fim COMPARTILHAR
+# o calendário da empresa com o e-mail da conta de serviço (algo como
+# nome@projeto.iam.gserviceaccount.com), dando a ela permissão de
+# "Fazer alterações nos eventos".
+# ------------------------------------------------------------------
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+GOOGLE_COLOR_POR_STATUS = {
+    "Aberto": "11",        # tomate/vermelho
+    "Em andamento": "9",   # mirtilo/azul
+    "Concluído": "10",     # manjericão/verde
+}
+
+
+@st.cache_resource
+def get_google_calendar():
+    """Autentica com a conta de serviço e devolve {service, calendar_id}, ou
+    None se a integração não estiver configurada/disponível. Nunca levanta
+    exceção — qualquer problema fica registrado em st.session_state para ser
+    mostrado de forma amigável na tela de Agenda."""
+    if not GOOGLE_CALENDAR_LIB_OK:
+        st.session_state["google_calendar_erro"] = (
+            "Bibliotecas do Google Calendar não instaladas. Adicione "
+            "'google-api-python-client' e 'google-auth' ao requirements.txt."
+        )
+        return None
+    try:
+        conf = st.secrets.get("google_calendar")
+    except Exception:
+        conf = None
+    if not conf or "service_account_json" not in conf or "calendar_id" not in conf:
+        return None
+    try:
+        info = json.loads(conf["service_account_json"])
+        creds = _google_service_account.Credentials.from_service_account_info(info, scopes=GOOGLE_SCOPES)
+        service = _google_build("calendar", "v3", credentials=creds, cache_discovery=False)
+        st.session_state["google_calendar_erro"] = None
+        return {"service": service, "calendar_id": conf["calendar_id"]}
+    except Exception as e:
+        st.session_state["google_calendar_erro"] = f"Falha ao autenticar com o Google: {e}"
+        return None
+
+
+def google_calendar_configurado() -> bool:
+    return get_google_calendar() is not None
+
+
+def _to_time(valor):
+    """Normaliza um valor de horário vindo do MySQL/streamlit para datetime.time
+    (pymysql às vezes devolve colunas TIME como timedelta)."""
+    if isinstance(valor, timedelta):
+        total = int(valor.total_seconds())
+        return dt_time(hour=(total // 3600) % 24, minute=(total % 3600) // 60, second=total % 60)
+    return valor
+
+
+def _nome_usuario_por_id(id_usuario):
+    if not id_usuario:
+        return None
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT nome_usuario FROM Usuarios WHERE id_usuario = %s", (id_usuario,))
+            r = cur.fetchone()
+            return r["nome_usuario"] if r else None
+    finally:
+        conn.close()
+
+
+def _construir_evento_os(os_info: dict):
+    data = os_info["data_abertura"]
+    inicio = _to_time(os_info.get("hh_inicio")) or dt_time(8, 0)
+    fim = _to_time(os_info.get("hh_fim"))
+    inicio_dt = datetime.combine(data, inicio)
+    if fim and fim > inicio:
+        fim_dt = datetime.combine(data, fim)
+    else:
+        fim_dt = inicio_dt + timedelta(hours=1)
+
+    return {
+        "summary": f"OS #{os_info['id_os']} · {os_info['tag_equipamento']}",
+        "description": (
+            f"{os_info.get('descricao_falha') or ''}\n\n"
+            f"Técnico: {os_info.get('tecnico') or '—'}\n"
+            f"Status: {os_info.get('status_os')}\n"
+            f"Gerado automaticamente pelo THAF Manutenção."
+        ),
+        "start": {"dateTime": inicio_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
+        "end": {"dateTime": fim_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
+        "colorId": GOOGLE_COLOR_POR_STATUS.get(os_info.get("status_os"), "1"),
+        "extendedProperties": {"private": {"thaf_id_os": str(os_info["id_os"])}},
+    }
+
+
+def _buscar_evento_google_por_os(id_os):
+    gcal = get_google_calendar()
+    if not gcal:
+        return None
+    try:
+        resp = gcal["service"].events().list(
+            calendarId=gcal["calendar_id"],
+            privateExtendedProperty=f"thaf_id_os={id_os}",
+            maxResults=1,
+        ).execute()
+        itens = resp.get("items", [])
+        return itens[0] if itens else None
+    except Exception as e:
+        st.session_state["google_calendar_erro"] = f"Falha ao consultar o Google Calendar: {e}"
+        return None
+
+
+def sincronizar_os_google(os_info: dict):
+    """Cria ou atualiza (upsert) o evento correspondente a uma OS no Google
+    Calendar. Não faz nada (silenciosamente) se a integração não estiver
+    configurada; nunca deixa uma falha do Google derrubar o fluxo de negócio."""
+    gcal = get_google_calendar()
+    if not gcal:
+        return None
+    try:
+        corpo = _construir_evento_os(os_info)
+        existente = _buscar_evento_google_por_os(os_info["id_os"])
+        if existente:
+            evento = gcal["service"].events().update(
+                calendarId=gcal["calendar_id"], eventId=existente["id"], body=corpo,
+            ).execute()
+        else:
+            evento = gcal["service"].events().insert(
+                calendarId=gcal["calendar_id"], body=corpo,
+            ).execute()
+        st.session_state["google_calendar_erro"] = None
+        buscar_eventos_google.clear()
+        return evento
+    except Exception as e:
+        st.session_state["google_calendar_erro"] = f"Falha ao sincronizar OS #{os_info['id_os']} com o Google: {e}"
+        return None
+
+
+def excluir_evento_google(id_os):
+    gcal = get_google_calendar()
+    if not gcal:
+        return
+    try:
+        existente = _buscar_evento_google_por_os(id_os)
+        if existente:
+            gcal["service"].events().delete(calendarId=gcal["calendar_id"], eventId=existente["id"]).execute()
+            buscar_eventos_google.clear()
+        st.session_state["google_calendar_erro"] = None
+    except Exception as e:
+        st.session_state["google_calendar_erro"] = f"Falha ao remover evento da OS #{id_os} no Google: {e}"
+
+
+@st.cache_data(ttl=30)
+def buscar_eventos_google(data_ini, data_fim):
+    """Lista os eventos do calendário compartilhado dentro do intervalo
+    [data_ini, data_fim]. Cada item retornado já indica se está vinculado a
+    uma OS (via extendedProperties) ou se foi criado direto no Google
+    ('externo') — usado para mostrar os dois mundos juntos na Agenda."""
+    gcal = get_google_calendar()
+    if not gcal:
+        return []
+    time_min = datetime.combine(data_ini, dt_time.min).isoformat() + "-03:00"
+    time_max = datetime.combine(data_fim, dt_time.max).isoformat() + "-03:00"
+    try:
+        resp = gcal["service"].events().list(
+            calendarId=gcal["calendar_id"],
+            timeMin=time_min, timeMax=time_max,
+            singleEvents=True, orderBy="startTime", maxResults=250,
+        ).execute()
+        eventos = []
+        for item in resp.get("items", []):
+            props = (item.get("extendedProperties") or {}).get("private") or {}
+            eventos.append({
+                "id_evento": item.get("id"),
+                "id_os": props.get("thaf_id_os"),
+                "titulo": item.get("summary") or "(sem título)",
+                "descricao": item.get("description") or "",
+                "inicio": item.get("start", {}).get("dateTime") or item.get("start", {}).get("date"),
+                "fim": item.get("end", {}).get("dateTime") or item.get("end", {}).get("date"),
+                "link": item.get("htmlLink"),
+                "externo": "thaf_id_os" not in props,
+            })
+        st.session_state["google_calendar_erro"] = None
+        return eventos
+    except Exception as e:
+        st.session_state["google_calendar_erro"] = f"Falha ao buscar eventos no Google: {e}"
+        return []
+
+
+def sincronizar_intervalo_com_google(ordens: list, data_ini, data_fim):
+    """Reenvia (upsert) para o Google todas as OS do intervalo informado.
+    Usado pelo botão manual '🔄 Sincronizar agora' da Agenda, cobrindo tanto
+    OS novas quanto qualquer uma que tenha ficado dessincronizada."""
+    if not google_calendar_configurado():
+        return 0
+    total = 0
+    for o in ordens:
+        if o["data_abertura"] and data_ini <= o["data_abertura"] <= data_fim:
+            if sincronizar_os_google(o) is not None:
+                total += 1
+    return total
+
+
+@st.cache_resource
+def get_pool():
+    """Cria (uma única vez por processo, graças ao cache_resource) um pool de
+    conexões reutilizável com o MySQL. Evita abrir/fechar uma conexão TCP nova
+    a cada rerun do Streamlit, que é o maior custo de latência das páginas."""
+    return PooledDB(
+        creator=pymysql,
+        maxconnections=15,
+        mincached=2,
+        maxcached=5,
+        blocking=True,
+        ping=1,  # testa a conexão antes de entregá-la (reconecta se caiu)
         host=DB_CONF["host"],
         port=int(DB_CONF["port"]),
         user=DB_CONF["user"],
@@ -58,6 +288,13 @@ def get_connection():
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
     )
+
+
+def get_connection():
+    """Pega uma conexão emprestada do pool. Continua suportando o mesmo
+    padrão `conn = get_connection(); ... ; conn.close()` usado no resto do
+    código — o `close()` aqui apenas devolve a conexão ao pool."""
+    return get_pool().connection()
 
 
 def get_client_ip() -> str:
@@ -105,6 +342,7 @@ def autenticar(email: str, senha: str):
     return None
 
 
+@st.cache_data(ttl=30)
 def buscar_ultimos_acessos(limit: int = 5):
     conn = get_connection()
     try:
@@ -125,6 +363,7 @@ def buscar_ultimos_acessos(limit: int = 5):
 STATUS_OS_OPCOES = ["Aberto", "Em andamento", "Concluído"]
 
 
+@st.cache_data(ttl=30)
 def listar_tecnicos():
     conn = get_connection()
     try:
@@ -139,6 +378,7 @@ def listar_tecnicos():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_ordens_servico(busca: str = ""):
     conn = get_connection()
     try:
@@ -162,6 +402,7 @@ def listar_ordens_servico(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_maquinas(busca: str = ""):
     """Lista as máquinas cadastradas, já com o modelo/fabricante (Modelos_Maquinas)
     e o setor (Setores) integrados via JOIN."""
@@ -171,6 +412,7 @@ def listar_maquinas(busca: str = ""):
             sql = """
                 SELECT m.tag_equipamento, m.numero_serie, m.localizacao_maquina,
                        m.tipo_manutencao_padrao, m.status_operacional, m.ultima_manutencao,
+                       m.id_setor, m.id_maquina,
                        s.nome_setor,
                        mm.nome_maquina, mm.fabricante_maquina, mm.nome_modelo, mm.potencia_especificacao
                 FROM Maquinas m
@@ -193,6 +435,24 @@ def listar_maquinas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
+def listar_modelos_maquinas():
+    """Lista os modelos de máquina cadastrados em Modelos_Maquinas, usados para
+    vincular uma nova máquina física (Maquinas.id_maquina) a um modelo já existente."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id_maquina, nome_maquina, fabricante_maquina, nome_modelo, potencia_especificacao
+                FROM Modelos_Maquinas
+                ORDER BY nome_maquina
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=30)
 def listar_setores():
     """Lista os setores com a contagem de máquinas e de usuários ativos vinculados a cada um."""
     conn = get_connection()
@@ -211,6 +471,7 @@ def listar_setores():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_pecas(busca: str = ""):
     """Lista os itens do almoxarifado de peças, com filtro opcional por nome."""
     conn = get_connection()
@@ -232,6 +493,7 @@ def listar_pecas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_ferramentas(busca: str = ""):
     """Lista as ferramentas do almoxarifado, mostrando com quem está (quando em uso/atrasada/solicitada)
     a partir da movimentação mais recente em aberto (Movimentacao_Ferramentas + OS_Ferramentas)."""
@@ -266,6 +528,7 @@ def listar_ferramentas(busca: str = ""):
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_riscos():
     """Lista a Matriz de Riscos (NR-01) / EPIs obrigatórios, com a contagem de OS
     em que cada risco foi associado (OS_Seguranca)."""
@@ -283,6 +546,7 @@ def listar_riscos():
         conn.close()
 
 
+@st.cache_data(ttl=30)
 def listar_usuarios(busca: str = ""):
     """Lista os usuários com o nome do setor (JOIN com Setores)."""
     conn = get_connection()
@@ -292,7 +556,7 @@ def listar_usuarios(busca: str = ""):
                 SELECT u.id_usuario, u.nome_usuario, u.email_usuario, u.cargo_usuario,
                        u.status_usuario, u.nivel_experiencia, u.disponibilidade_tecnico,
                        u.telefone_usuario, u.data_nasc_usuario, u.data_cadastro,
-                       s.nome_setor
+                       u.id_setor, s.nome_setor
                 FROM Usuarios u
                 LEFT JOIN Setores s ON s.id_setor = u.id_setor
             """
@@ -320,9 +584,16 @@ def criar_os(tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim,
                     (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario))
-            return cur.lastrowid
+            novo_id = cur.lastrowid
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a nova OS deve aparecer imediatamente
+    sincronizar_os_google({
+        "id_os": novo_id, "tag_equipamento": tag_equipamento, "descricao_falha": descricao_falha,
+        "data_abertura": data_abertura, "hh_inicio": hh_inicio, "hh_fim": hh_fim,
+        "status_os": status_os, "tecnico": _nome_usuario_por_id(id_usuario),
+    })
+    return novo_id
 
 
 def atualizar_os(id_os, tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario):
@@ -337,6 +608,12 @@ def atualizar_os(id_os, tag_equipamento, descricao_falha, data_abertura, hh_inic
             """, (tag_equipamento, descricao_falha, data_abertura, hh_inicio, hh_fim, status_os, id_usuario, id_os))
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a edição deve refletir imediatamente
+    sincronizar_os_google({
+        "id_os": id_os, "tag_equipamento": tag_equipamento, "descricao_falha": descricao_falha,
+        "data_abertura": data_abertura, "hh_inicio": hh_inicio, "hh_fim": hh_fim,
+        "status_os": status_os, "tecnico": _nome_usuario_por_id(id_usuario),
+    })
 
 
 def excluir_os(id_os):
@@ -346,6 +623,65 @@ def excluir_os(id_os):
             cur.execute("DELETE FROM Ordens_Servico WHERE id_os = %s", (id_os,))
     finally:
         conn.close()
+    listar_ordens_servico.clear()  # invalida o cache: a OS excluída não deve mais aparecer
+    excluir_evento_google(id_os)  # remove o evento correspondente no Google Calendar, se existir
+
+
+def criar_maquina(tag_equipamento, numero_serie, localizacao_maquina, tipo_manutencao_padrao,
+                   status_operacional, ultima_manutencao, id_setor, id_maquina):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO Maquinas
+                    (tag_equipamento, numero_serie, localizacao_maquina, tipo_manutencao_padrao,
+                     status_operacional, ultima_manutencao, id_setor, id_maquina)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (tag_equipamento, numero_serie, localizacao_maquina, tipo_manutencao_padrao,
+                  status_operacional, ultima_manutencao, id_setor, id_maquina))
+    finally:
+        conn.close()
+    listar_maquinas.clear()  # invalida o cache: a nova máquina deve aparecer imediatamente
+    listar_setores.clear()   # o total_maquinas por setor também muda
+
+
+def atualizar_maquina(tag_original, tag_equipamento, numero_serie, localizacao_maquina,
+                       tipo_manutencao_padrao, status_operacional, ultima_manutencao,
+                       id_setor, id_maquina):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE Maquinas
+                SET tag_equipamento = %s, numero_serie = %s, localizacao_maquina = %s,
+                    tipo_manutencao_padrao = %s, status_operacional = %s, ultima_manutencao = %s,
+                    id_setor = %s, id_maquina = %s
+                WHERE tag_equipamento = %s
+            """, (tag_equipamento, numero_serie, localizacao_maquina, tipo_manutencao_padrao,
+                  status_operacional, ultima_manutencao, id_setor, id_maquina, tag_original))
+            if tag_original != tag_equipamento:
+                # a tag é referenciada em Ordens_Servico; mantém o histórico apontando
+                # para a nova tag quando o usuário decide renomeá-la.
+                cur.execute(
+                    "UPDATE Ordens_Servico SET tag_equipamento = %s WHERE tag_equipamento = %s",
+                    (tag_equipamento, tag_original),
+                )
+    finally:
+        conn.close()
+    listar_maquinas.clear()
+    listar_setores.clear()
+    listar_ordens_servico.clear()
+
+
+def excluir_maquina(tag_equipamento):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Maquinas WHERE tag_equipamento = %s", (tag_equipamento,))
+    finally:
+        conn.close()
+    listar_maquinas.clear()
+    listar_setores.clear()
 
 
 if "logged_in" not in st.session_state:
@@ -364,6 +700,15 @@ if "os_busca" not in st.session_state:
     st.session_state.os_busca = ""
 if "os_confirmar_exclusao" not in st.session_state:
     st.session_state.os_confirmar_exclusao = None
+if "tema" not in st.session_state:
+    st.session_state.tema = "escuro"
+if "login_tentativas" not in st.session_state:
+    st.session_state.login_tentativas = 0
+if "login_bloqueado_ate" not in st.session_state:
+    st.session_state.login_bloqueado_ate = None
+
+LIMITE_TENTATIVAS_LOGIN = 5
+BLOQUEIO_SEGUNDOS = 30
 
 
 def fill_demo(email, senha):
@@ -376,21 +721,43 @@ def quick_login(email, senha):
     do_login()
 
 
+def login_bloqueado():
+    """Retorna quantos segundos faltam de bloqueio (0 se não estiver bloqueado)."""
+    bloqueado_ate = st.session_state.login_bloqueado_ate
+    if not bloqueado_ate:
+        return 0
+    restante = (bloqueado_ate - agora_brasil()).total_seconds()
+    if restante <= 0:
+        st.session_state.login_bloqueado_ate = None
+        st.session_state.login_tentativas = 0
+        return 0
+    return int(restante) + 1
+
+
 def do_login():
+    if login_bloqueado() > 0:
+        return
+
     email_tentativa = st.session_state.email_input.strip().lower()
-    try:
-        row = autenticar(st.session_state.email_input, st.session_state.senha_input)
-        if row:
-            st.session_state.logged_in = True
-            st.session_state.user_data = row
-            st.session_state.login_error = False
-            log_acesso(row["id_usuario"], "Login", True)
-        else:
-            st.session_state.login_error = True
-            log_acesso(None, f"Login falhou (email: {email_tentativa})", False)
-    except Exception as e:
-        st.session_state.db_error = str(e)
-        log_acesso(None, f"Login com erro (email: {email_tentativa})", False)
+    with st.spinner("Verificando credenciais..."):
+        try:
+            row = autenticar(st.session_state.email_input, st.session_state.senha_input)
+            if row:
+                st.session_state.logged_in = True
+                st.session_state.user_data = row
+                st.session_state.login_error = False
+                st.session_state.login_tentativas = 0
+                st.session_state.login_bloqueado_ate = None
+                log_acesso(row["id_usuario"], "Login", True)
+            else:
+                st.session_state.login_error = True
+                st.session_state.login_tentativas += 1
+                if st.session_state.login_tentativas >= LIMITE_TENTATIVAS_LOGIN:
+                    st.session_state.login_bloqueado_ate = agora_brasil() + timedelta(seconds=BLOQUEIO_SEGUNDOS)
+                log_acesso(None, f"Login falhou (email: {email_tentativa})", False)
+        except Exception as e:
+            st.session_state.db_error = str(e)
+            log_acesso(None, f"Login com erro (email: {email_tentativa})", False)
 
 
 def do_logout():
@@ -403,6 +770,52 @@ def do_logout():
 
 def ir_para(pagina: str):
     st.session_state.pagina = pagina
+
+
+def alternar_tema():
+    st.session_state.tema = "claro" if st.session_state.tema == "escuro" else "escuro"
+
+
+def paginar_lista(itens, chave: str, tamanho_pagina: int = 15):
+    """Pagina uma lista em memória e desenha os controles de navegação
+    (Anterior / Próxima + indicador de página). Evita renderizar centenas de
+    linhas HTML de uma vez, o que é o maior custo de renderização das telas
+    de listagem. Retorna apenas os itens da página atual."""
+    chave_pagina = f"pagina_{chave}"
+    if chave_pagina not in st.session_state:
+        st.session_state[chave_pagina] = 0
+
+    total_itens = len(itens)
+    total_paginas = max((total_itens - 1) // tamanho_pagina + 1, 1)
+
+    if st.session_state[chave_pagina] >= total_paginas:
+        st.session_state[chave_pagina] = total_paginas - 1
+    if st.session_state[chave_pagina] < 0:
+        st.session_state[chave_pagina] = 0
+
+    pagina_atual = st.session_state[chave_pagina]
+    inicio = pagina_atual * tamanho_pagina
+    fim = inicio + tamanho_pagina
+    itens_pagina = itens[inicio:fim]
+
+    if total_itens > tamanho_pagina:
+        p1, p2, p3 = st.columns([1, 2, 1])
+        with p1:
+            if st.button("◀ Anterior", key=f"{chave}_prev", disabled=pagina_atual == 0, use_container_width=True):
+                st.session_state[chave_pagina] -= 1
+                st.rerun()
+        with p2:
+            st.markdown(
+                f'<div style="text-align:center; font-size:12.5px; color:#94a3b8; padding-top:8px;">'
+                f'Página {pagina_atual + 1} de {total_paginas} · {total_itens} registro(s)</div>',
+                unsafe_allow_html=True,
+            )
+        with p3:
+            if st.button("Próxima ▶", key=f"{chave}_next", disabled=pagina_atual >= total_paginas - 1, use_container_width=True):
+                st.session_state[chave_pagina] += 1
+                st.rerun()
+
+    return itens_pagina
 
 
 def status_slug(status: str) -> str:
@@ -460,8 +873,11 @@ def grafico_barras(df, coluna, cores_mapa=None, cor_padrao="#2563eb", moeda=Fals
     rotulos = _formatar_rotulos(dados[coluna], moeda)
     cores = [cores_mapa.get(v, cor_padrao) for v in dados[categoria_col]] if cores_mapa else cor_padrao
 
-    eixo_valor = dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False)
-    eixo_categoria = dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5))
+    cor_texto_eixo = "#94a3b8" if st.session_state.tema == "escuro" else "#64748b"
+    cor_grade = "rgba(148,163,184,0.18)" if st.session_state.tema == "escuro" else "#eef2f7"
+
+    eixo_valor = dict(showgrid=True, gridcolor=cor_grade, tickfont=dict(color=cor_texto_eixo, size=11.5), zeroline=False)
+    eixo_categoria = dict(showgrid=False, tickfont=dict(color=cor_texto_eixo, size=11.5))
 
     if horizontal:
         fig = px.bar(dados, x=coluna, y=categoria_col, orientation="h")
@@ -478,12 +894,13 @@ def grafico_barras(df, coluna, cores_mapa=None, cor_padrao="#2563eb", moeda=Fals
         )
         fig.update_layout(xaxis=eixo_categoria, yaxis=eixo_valor)
 
+    fonte = dict(_FONTE_GRAFICOS, color=cor_texto_eixo)
     fig.update_layout(
         margin=dict(l=8, r=8, t=10, b=8),
         height=altura,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=_FONTE_GRAFICOS,
+        font=fonte,
         showlegend=False,
         bargap=0.35,
         uniformtext_minsize=9,
@@ -498,6 +915,9 @@ def grafico_area(df, coluna, cor="#2563eb", altura=280):
     dados = df.reset_index()
     categoria_col = dados.columns[0]
 
+    cor_texto_eixo = "#94a3b8" if st.session_state.tema == "escuro" else "#64748b"
+    cor_grade = "rgba(148,163,184,0.18)" if st.session_state.tema == "escuro" else "#eef2f7"
+
     fig = px.area(dados, x=categoria_col, y=coluna)
     fig.update_traces(
         line=dict(color=cor, width=2.5),
@@ -506,17 +926,124 @@ def grafico_area(df, coluna, cor="#2563eb", altura=280):
         marker=dict(size=6, color=cor),
         hovertemplate="<b>%{x}</b><br>%{y}<extra></extra>",
     )
+    fonte = dict(_FONTE_GRAFICOS, color=cor_texto_eixo)
     fig.update_layout(
         margin=dict(l=8, r=8, t=10, b=8),
         height=altura,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        font=_FONTE_GRAFICOS,
-        xaxis=dict(showgrid=False, tickfont=dict(color="#64748b", size=11.5)),
-        yaxis=dict(showgrid=True, gridcolor="#eef2f7", tickfont=dict(color="#64748b", size=11.5), zeroline=False),
+        font=fonte,
+        xaxis=dict(showgrid=False, tickfont=dict(color=cor_texto_eixo, size=11.5)),
+        yaxis=dict(showgrid=True, gridcolor=cor_grade, tickfont=dict(color=cor_texto_eixo, size=11.5), zeroline=False),
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def _minutos_horario(valor):
+    """Converte um horário (dt_time ou timedelta cru vindo do MySQL) em minutos
+    desde 00:00. Retorna None se o valor for ausente/inválido."""
+    t = _to_time(valor)
+    if t is None:
+        return None
+    return t.hour * 60 + t.minute + t.second / 60
+
+
+def calcular_duracao_horas(hh_inicio, hh_fim):
+    """Duração em horas entre hh_inicio e hh_fim (mesmo dia). Retorna None
+    quando os horários estão ausentes ou quando hh_fim não é posterior a
+    hh_inicio (jornada mal registrada), para não distorcer o MTTR."""
+    ini = _minutos_horario(hh_inicio)
+    fim = _minutos_horario(hh_fim)
+    if ini is None or fim is None or fim <= ini:
+        return None
+    return (fim - ini) / 60
+
+
+def calcular_indicadores_manutencao(df_ordens, maquinas):
+    """Calcula os indicadores clássicos de manutenção a partir das Ordens de
+    Serviço já filtradas (período/técnico) e da lista de máquinas cadastradas:
+
+    - MTTR (Mean Time To Repair): duração média das OS concluídas com
+      horário de início e fim válidos.
+    - MTBF (Mean Time Between Failures): intervalo médio, em dias, entre
+      aberturas consecutivas de OS na mesma tag_equipamento.
+    - Backlog: quantidade de OS ainda não concluídas, segmentada por
+      faixa de idade (dias desde a abertura).
+    - Disponibilidade: % de máquinas cadastradas com status "Operando".
+
+    Retorna um dicionário com os valores agregados e os DataFrames já
+    prontos para os gráficos."""
+    hoje = agora_brasil().date()
+
+    # ---------- MTTR ----------
+    concluidas = df_ordens[df_ordens["status_os"] == "Concluído"].copy()
+    if not concluidas.empty:
+        concluidas["duracao_horas"] = concluidas.apply(
+            lambda r: calcular_duracao_horas(r["hh_inicio"], r["hh_fim"]), axis=1
+        )
+    else:
+        concluidas["duracao_horas"] = pd.Series(dtype=float)
+
+    duracoes_validas = concluidas["duracao_horas"].dropna()
+    mttr_horas = duracoes_validas.mean() if not duracoes_validas.empty else None
+
+    if not concluidas.empty and concluidas["duracao_horas"].notna().any():
+        concluidas["mes"] = pd.to_datetime(concluidas["data_abertura"].astype(str)).dt.to_period("M").astype(str)
+        mttr_mensal = (
+            concluidas.dropna(subset=["duracao_horas"])
+            .groupby("mes")["duracao_horas"].mean()
+            .rename_axis("Mês").reset_index(name="MTTR (h)")
+            .sort_values("Mês").set_index("Mês")
+        )
+    else:
+        mttr_mensal = pd.DataFrame()
+
+    # ---------- MTBF ----------
+    intervalos = []
+    for _tag, grupo in df_ordens.sort_values("data_abertura").groupby("tag_equipamento"):
+        datas = grupo["data_abertura"].tolist()
+        for i in range(1, len(datas)):
+            intervalos.append((datas[i] - datas[i - 1]).days)
+    mtbf_dias = (sum(intervalos) / len(intervalos)) if intervalos else None
+
+    # ---------- Backlog por idade ----------
+    pendentes = df_ordens[df_ordens["status_os"] != "Concluído"].copy()
+
+    def _faixa_idade(data_abertura):
+        dias = (hoje - data_abertura).days
+        if dias <= 7:
+            return "0-7 dias"
+        elif dias <= 15:
+            return "8-15 dias"
+        elif dias <= 30:
+            return "16-30 dias"
+        return "+30 dias"
+
+    if not pendentes.empty:
+        pendentes["faixa"] = pendentes["data_abertura"].apply(_faixa_idade)
+        ordem_faixas = ["0-7 dias", "8-15 dias", "16-30 dias", "+30 dias"]
+        df_backlog = (
+            pendentes["faixa"].value_counts()
+            .reindex(ordem_faixas).fillna(0).astype(int)
+            .rename_axis("Faixa").reset_index(name="Quantidade").set_index("Faixa")
+        )
+    else:
+        df_backlog = pd.DataFrame()
+
+    # ---------- Disponibilidade dos equipamentos ----------
+    total_maquinas = len(maquinas)
+    operando = sum(1 for m in maquinas if m["status_operacional"] == "Operando")
+    disponibilidade_pct = (operando / total_maquinas * 100) if total_maquinas else None
+
+    return {
+        "mttr_horas": mttr_horas,
+        "mttr_mensal": mttr_mensal,
+        "mtbf_dias": mtbf_dias,
+        "backlog_total": len(pendentes),
+        "df_backlog": df_backlog,
+        "disponibilidade_pct": disponibilidade_pct,
+    }
 
 
 @st.dialog("Nova Ordem de Serviço")
@@ -547,12 +1074,13 @@ def dialog_nova_os():
         if not tag or not desc or not tecnico_nome:
             st.error("Preencha equipamento, descrição e técnico responsável.")
         else:
-            try:
-                criar_os(tag, desc, data_abertura, hh_inicio, hh_fim, status, mapa_tecnicos[tecnico_nome])
-                st.success("OS criada com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao salvar no banco: {e}")
+            with st.spinner("Salvando OS..."):
+                try:
+                    criar_os(tag, desc, data_abertura, hh_inicio, hh_fim, status, mapa_tecnicos[tecnico_nome])
+                    st.success("OS criada com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
 
 
 @st.dialog("Editar Ordem de Serviço")
@@ -581,41 +1109,286 @@ def dialog_editar_os(row):
     tecnico_nome = st.selectbox("Técnico responsável", nomes, index=idx_atual) if nomes else None
 
     if st.button("Salvar alterações", type="primary"):
-        try:
-            atualizar_os(row["id_os"], tag, desc, data_abertura, hh_inicio, hh_fim, status, mapa_tecnicos[tecnico_nome])
-            st.success("OS atualizada com sucesso!")
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_os(row["id_os"], tag, desc, data_abertura, hh_inicio, hh_fim, status, mapa_tecnicos[tecnico_nome])
+                st.success("OS atualizada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+STATUS_OPERACIONAL_OPCOES = ["Operando", "Parado", "Em Manutenção"]
+
+
+def _mapa_setores():
+    try:
+        return {s["nome_setor"]: s["id_setor"] for s in listar_setores()}
+    except Exception:
+        return {}
+
+
+def _mapa_modelos():
+    try:
+        return {
+            f'{m["nome_maquina"]} · {m["nome_modelo"]} ({m["fabricante_maquina"]})': m["id_maquina"]
+            for m in listar_modelos_maquinas()
+        }
+    except Exception:
+        return {}
+
+
+@st.dialog("Nova Máquina")
+def dialog_nova_maquina():
+    mapa_setores = _mapa_setores()
+    mapa_modelos = _mapa_modelos()
+
+    if not mapa_setores:
+        st.warning("Cadastre um setor antes de adicionar uma máquina.")
+    if not mapa_modelos:
+        st.warning("Nenhum modelo cadastrado em Modelos_Maquinas. Cadastre um modelo antes de continuar.")
+
+    tag = st.text_input("Tag do equipamento", placeholder="Ex: TCV-002")
+    numero_serie = st.text_input("Número de série")
+    localizacao = st.text_input("Localização")
+    tipo_manutencao = st.text_input("Tipo de manutenção padrão", placeholder="Ex: Preventiva mensal")
+    c1, c2 = st.columns(2)
+    with c1:
+        status = st.selectbox("Status operacional", STATUS_OPERACIONAL_OPCOES)
+    with c2:
+        ultima_manutencao = st.date_input("Última manutenção", value=None)
+
+    setor_nome = st.selectbox("Setor", list(mapa_setores.keys())) if mapa_setores else None
+    modelo_nome = st.selectbox("Modelo da máquina", list(mapa_modelos.keys())) if mapa_modelos else None
+
+    if st.button("Salvar Máquina", type="primary"):
+        if not tag or not numero_serie or not localizacao or not setor_nome or not modelo_nome:
+            st.error("Preencha tag, número de série, localização, setor e modelo.")
+        else:
+            with st.spinner("Salvando máquina..."):
+                try:
+                    criar_maquina(
+                        tag, numero_serie, localizacao, tipo_manutencao, status,
+                        ultima_manutencao, mapa_setores[setor_nome], mapa_modelos[modelo_nome],
+                    )
+                    st.success("Máquina criada com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Máquina")
+def dialog_editar_maquina(row):
+    mapa_setores = _mapa_setores()
+    mapa_modelos = _mapa_modelos()
+
+    tag = st.text_input("Tag do equipamento", value=row["tag_equipamento"])
+    numero_serie = st.text_input("Número de série", value=row["numero_serie"])
+    localizacao = st.text_input("Localização", value=row["localizacao_maquina"])
+    tipo_manutencao = st.text_input("Tipo de manutenção padrão", value=row["tipo_manutencao_padrao"] or "")
+    c1, c2 = st.columns(2)
+    with c1:
+        status = st.selectbox(
+            "Status operacional", STATUS_OPERACIONAL_OPCOES,
+            index=STATUS_OPERACIONAL_OPCOES.index(row["status_operacional"])
+            if row["status_operacional"] in STATUS_OPERACIONAL_OPCOES else 0,
+        )
+    with c2:
+        ultima_manutencao = st.date_input("Última manutenção", value=row["ultima_manutencao"])
+
+    nomes_setores = list(mapa_setores.keys())
+    setor_atual = row.get("nome_setor")
+    idx_setor = nomes_setores.index(setor_atual) if setor_atual in nomes_setores else 0
+    setor_nome = st.selectbox("Setor", nomes_setores, index=idx_setor) if nomes_setores else None
+
+    nomes_modelos = list(mapa_modelos.keys())
+    modelo_atual = f'{row.get("nome_maquina")} · {row.get("nome_modelo")} ({row.get("fabricante_maquina")})'
+    idx_modelo = nomes_modelos.index(modelo_atual) if modelo_atual in nomes_modelos else 0
+    modelo_nome = st.selectbox("Modelo da máquina", nomes_modelos, index=idx_modelo) if nomes_modelos else None
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_maquina(
+                    row["tag_equipamento"], tag, numero_serie, localizacao, tipo_manutencao, status,
+                    ultima_manutencao, mapa_setores[setor_nome], mapa_modelos[modelo_nome],
+                )
+                st.success("Máquina atualizada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+@st.dialog("Histórico de Manutenção")
+def dialog_historico_maquina(row):
+    """Monta o histórico de manutenção da máquina a partir das Ordens de Serviço
+    já registradas para a sua tag_equipamento — sem depender de uma tabela extra."""
+    st.markdown(f"**{row['tag_equipamento']}** · {row['nome_maquina']} ({row['nome_modelo']})")
+
+    try:
+        with st.spinner("Carregando histórico..."):
+            ordens = listar_ordens_servico()
+    except Exception as e:
+        st.error(f"Não foi possível carregar o histórico: {e}")
+        return
+
+    historico = [o for o in ordens if o["tag_equipamento"] == row["tag_equipamento"]]
+
+    if not historico:
+        st.info("Nenhuma Ordem de Serviço registrada para esta máquina ainda.")
+        return
+
+    total = len(historico)
+    concluidas = sum(1 for o in historico if o["status_os"] == "Concluído")
+    k1, k2 = st.columns(2)
+    k1.metric("OS registradas", total)
+    k2.metric("Concluídas", concluidas)
+
+    st.markdown("---")
+    for o in historico:
+        slug = status_slug(o["status_os"])
+        st.markdown(
+            f'<div class="os-row">'
+            f'<b>{o["data_abertura"]}</b> · {o["hh_inicio"]} → {o["hh_fim"] or "—"} '
+            f'<span class="status-badge status-{slug}">{o["status_os"]}</span><br>'
+            f'<span class="os-cell">{o["descricao_falha"]}</span><br>'
+            f'<span class="os-cell-muted">Técnico: {o["tecnico"] or "—"} · OS #{o["id_os"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+@st.dialog("Confirmar exclusão")
+def dialog_confirmar_exclusao(mensagem: str, funcao_excluir, *args):
+    """Modal genérico de confirmação de exclusão, reutilizado por todas as
+    telas do sistema. Só executa `funcao_excluir(*args)` se o usuário
+    confirmar explicitamente — nunca exclui direto no clique da lixeira."""
+    st.warning(f"⚠️ {mensagem}")
+    st.caption("Esta ação não pode ser desfeita.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Sim, excluir", type="primary", use_container_width=True):
+            with st.spinner("Excluindo..."):
+                try:
+                    funcao_excluir(*args)
+                    st.success("Excluído com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao excluir: {e}")
+    with c2:
+        if st.button("Cancelar", use_container_width=True):
             st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao atualizar no banco: {e}")
 
 
-st.markdown("""
+def excluir_setor(id_setor):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Setores WHERE id_setor = %s", (id_setor,))
+    finally:
+        conn.close()
+    listar_setores.clear()
+
+
+def excluir_peca(id_peca):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Almoxarifado_Pecas WHERE id_peca = %s", (id_peca,))
+    finally:
+        conn.close()
+    listar_pecas.clear()
+
+
+def excluir_ferramenta(id_ferramenta):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Almoxarifado_Ferramentas WHERE id_ferramenta = %s", (id_ferramenta,))
+    finally:
+        conn.close()
+    listar_ferramentas.clear()
+
+
+def excluir_risco(id_risco):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Matriz_Riscos_EPI WHERE id_risco = %s", (id_risco,))
+    finally:
+        conn.close()
+    listar_riscos.clear()
+
+
+def excluir_usuario(id_usuario):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Usuarios WHERE id_usuario = %s", (id_usuario,))
+    finally:
+        conn.close()
+    listar_usuarios.clear()
+
+
+# ------------------------------------------------------------------
+# TEMA (claro/escuro) — paleta de cores conforme st.session_state.tema
+# ------------------------------------------------------------------
+if st.session_state.tema == "escuro":
+    TEMA = dict(
+        app_bg="#0b1220",
+        sidebar_bg="#0f172a",
+        card_bg="#111827",
+        card_border="#1f2937",
+        text_primary="#e5e7eb",
+        text_secondary="#94a3b8",
+        text_muted="#64748b",
+        input_bg="#0b1220",
+        input_border="#1f2937",
+        table_header_border="#1f2937",
+        row_border="#1f2937",
+    )
+else:
+    TEMA = dict(
+        app_bg="#f1f5f9",
+        sidebar_bg="#0f172a",
+        card_bg="#ffffff",
+        card_border="#e2e8f0",
+        text_primary="#0f172a",
+        text_secondary="#64748b",
+        text_muted="#64748b",
+        input_bg="#ffffff",
+        input_border="#e2e8f0",
+        table_header_border="#e2e8f0",
+        row_border="#e2e8f0",
+    )
+
+st.markdown(f"""
 <style>
-#MainMenu, header, footer {visibility: hidden;}
-html, body {margin: 0; padding: 0;}
-.block-container {padding: 0 !important; max-width: 100% !important;}
-.stApp {background: #0b1b3a;}
-[data-testid="stAppViewContainer"], [data-testid="stMain"] {padding: 0 !important;}
+#MainMenu, header, footer {{visibility: hidden;}}
+html, body {{margin: 0; padding: 0;}}
+.block-container {{padding: 0 !important; max-width: 100% !important;}}
+.stApp {{background: #0b1b3a;}}
+[data-testid="stAppViewContainer"], [data-testid="stMain"] {{padding: 0 !important;}}
 
 /* ======================================================================
    TELA DE LOGIN — estilo "foguete", tons de azul, tela inteira
    ====================================================================== */
-.st-key-unified_panel {
+.st-key-unified_panel {{
     padding: 0;
     margin: 0;
     min-height: 100vh;
     display: grid !important;
     grid-template-columns: 48fr 52fr;
     align-items: stretch;
-}
+}}
 .st-key-unified_panel > div,
 .st-key-unified_panel > div > div,
-.st-key-unified_panel > div > div > div {
+.st-key-unified_panel > div > div > div {{
     height: 100%;
-}
+}}
 
 /* ---------- Painel esquerdo: decorativo, foguete, várias tonalidades de azul ---------- */
-.st-key-rocket_panel {
+.st-key-rocket_panel {{
     position: relative;
     overflow: hidden;
     min-height: 100vh;
@@ -632,300 +1405,310 @@ html, body {margin: 0; padding: 0;}
         radial-gradient(circle at 25% 88%, rgba(255,255,255,0.10) 0 2px, transparent 2px),
         linear-gradient(150deg, #050e24 0%, #0c2a63 32%, #1d4ed8 62%, #38bdf8 100%);
     background-size: 60px 60px, 90px 90px, 70px 70px, 100px 100px, 80px 80px, cover;
-}
-.st-key-rocket_panel::before {
+}}
+.st-key-rocket_panel::before {{
     content: "";
     position: absolute;
     top: -70px; right: -70px;
     width: 260px; height: 260px;
     border-radius: 50%;
     background: rgba(255,255,255,0.08);
-}
-.st-key-rocket_panel::after {
+}}
+.st-key-rocket_panel::after {{
     content: "";
     position: absolute;
     bottom: -90px; left: -50px;
     width: 240px; height: 240px;
     border-radius: 50%;
     background: rgba(56,189,248,0.30);
-}
-.rocket-mid-circle {
+}}
+.rocket-mid-circle {{
     position: absolute;
     top: 50%; left: 8%;
     transform: translateY(-50%);
     width: 26px; height: 26px;
     border-radius: 50%;
     background: rgba(255,255,255,0.18);
-}
+}}
 
-.brand-box {display: flex; align-items: center; gap: 14px; position: relative; z-index: 2;}
-.brand-icon {
+.brand-box {{display: flex; align-items: center; gap: 14px; position: relative; z-index: 2;}}
+.brand-icon {{
     background: rgba(255,255,255,0.18);
     border-radius: 16px;
     width: 56px; height: 56px;
     display: flex; align-items: center; justify-content: center;
     font-size: 26px;
     flex-shrink: 0;
-}
-.brand-title {font-weight: 800; font-size: 21px; line-height: 1.1;}
-.brand-sub {font-size: 13.5px; opacity: 0.8;}
+}}
+.brand-title {{font-weight: 800; font-size: 21px; line-height: 1.1;}}
+.brand-sub {{font-size: 13.5px; opacity: 0.8;}}
 
-.rocket-stage {
+.rocket-stage {{
     position: relative;
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2;
-}
-.rocket-ring {
+}}
+.rocket-ring {{
     position: absolute;
     width: 320px; height: 320px;
     border-radius: 50%;
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(255,255,255,0.04);
-}
-.smoke-cloud {
+}}
+.smoke-cloud {{
     position: absolute;
     width: 300px; height: 300px;
     border-radius: 50%;
     background: radial-gradient(circle, rgba(255,255,255,0.40) 0%, rgba(255,255,255,0.08) 55%, transparent 72%);
     filter: blur(1px);
-}
-.rocket-emoji {
+}}
+.rocket-emoji {{
     position: relative;
     font-size: 128px;
     transform: rotate(-40deg);
     filter: drop-shadow(0 22px 22px rgba(2,6,23,0.55));
-}
+}}
 
-.rocket-tagline {
+.rocket-tagline {{
     position: relative;
     z-index: 2;
     font-size: 26px;
     font-weight: 800;
     line-height: 1.35;
     max-width: 380px;
-}
-.rocket-tagline span {
+}}
+.rocket-tagline span {{
     display: block;
     font-size: 14.5px;
     font-weight: 400;
     color: rgba(255,255,255,0.75);
     margin-top: 10px;
-}
+}}
 
-/* ---------- Painel direito: cartão de login branco, cobrindo a tela toda ---------- */
-.st-key-login_card {
+/* ---------- Painel direito: cartão de login, cobrindo a tela toda ---------- */
+.st-key-login_card {{
     box-sizing: border-box;
     width: 100%;
     min-height: 100vh;
     padding: 72px 9vw;
     margin: 0;
-    background: #ffffff;
+    background: {TEMA['card_bg']};
     display: flex !important;
     flex-direction: column;
     justify-content: center;
-}
-.login-eyebrow {
+}}
+.login-eyebrow {{
     color: #2563eb;
     font-weight: 700;
     font-size: 12.5px;
     letter-spacing: 0.10em;
     text-transform: uppercase;
     margin-bottom: 10px;
-}
-.login-title {font-size: 40px; font-weight: 800; color: #0c1e3e; margin-bottom: 8px;}
-.login-sub {color: #64748b; font-size: 15.5px; margin-bottom: 36px;}
+}}
+.login-title {{font-size: 40px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 8px;}}
+.login-sub {{color: {TEMA['text_secondary']}; font-size: 15.5px; margin-bottom: 36px;}}
 
-div[data-testid="stTextInput"] label p {color: #334155 !important; font-size: 14.5px !important; font-weight: 600;}
+div[data-testid="stTextInput"] label p {{color: {TEMA['text_primary']} !important; font-size: 14.5px !important; font-weight: 600;}}
 
-div[data-testid="stTextInput"] input {
+div[data-testid="stTextInput"] input {{
     border-radius: 999px !important;
-    border: 1.5px solid #dbeafe !important;
-    background: #f8fafc !important;
-    color: #0c1e3e !important;
+    border: 1.5px solid {TEMA['input_border']} !important;
+    background: {TEMA['input_bg']} !important;
+    color: {TEMA['text_primary']} !important;
     padding: 16px 22px !important;
     font-size: 15.5px !important;
-}
-div[data-testid="stTextInput"] input:focus {
+}}
+div[data-testid="stTextInput"] input:focus {{
     border-color: #38bdf8 !important;
     box-shadow: 0 0 0 3px rgba(56,189,248,0.20) !important;
-}
-div[data-testid="stTextInput"] input::placeholder {color: #94a3b8 !important;}
-div[data-testid="stTextInput"] {margin-bottom: 10px;}
+}}
+div[data-testid="stTextInput"] input::placeholder {{color: #94a3b8 !important;}}
+div[data-testid="stTextInput"] {{margin-bottom: 10px;}}
 
-.login-row {
+.login-row {{
     display: flex; justify-content: space-between; align-items: center;
-    font-size: 13.5px; color: #64748b; margin: 4px 4px 22px 4px;
-}
-.login-row .login-link {color: #2563eb; font-weight: 600; cursor: pointer;}
+    font-size: 13.5px; color: {TEMA['text_secondary']}; margin: 4px 4px 22px 4px;
+}}
+.login-row .login-link {{color: #2563eb; font-weight: 600; cursor: pointer;}}
 
-.stButton>button {width: 100%; border-radius: 999px; font-weight: 700; font-size: 16.5px;}
+.stButton>button {{width: 100%; border-radius: 999px; font-weight: 700; font-size: 16.5px;}}
 
-.st-key-entrar_btn_wrap button {
+.st-key-entrar_btn_wrap button {{
     background: linear-gradient(90deg, #1d4ed8 0%, #38bdf8 100%);
     color: #ffffff; border: none; padding: 17px 0; font-weight: 700; font-size: 16.5px;
     box-shadow: 0 12px 24px rgba(29,78,216,0.35);
-}
-.st-key-entrar_btn_wrap button:hover {filter: brightness(1.05);}
+}}
+.st-key-entrar_btn_wrap button:hover {{filter: brightness(1.05);}}
+.st-key-entrar_btn_wrap button:disabled {{opacity: 0.55; box-shadow: none; cursor: not-allowed;}}
 
-.demo-label {
+.demo-label {{
     font-size: 12px; letter-spacing: 0.08em; color: #94a3b8;
     text-transform: uppercase; font-weight: 700; margin: 38px 0 14px 2px;
-}
+}}
 .st-key-demo_0 button, .st-key-demo_1 button,
-.st-key-demo_2 button, .st-key-demo_3 button {
-    background: #eff6ff;
-    border: 1.5px solid #bfdbfe;
+.st-key-demo_2 button, .st-key-demo_3 button {{
+    background: {"#111827" if st.session_state.tema == "escuro" else "#eff6ff"};
+    border: 1.5px solid {"#1f2937" if st.session_state.tema == "escuro" else "#bfdbfe"};
     border-radius: 14px;
     text-align: left; padding: 14px 16px;
-    color: #1e3a8a;
+    color: {"#93c5fd" if st.session_state.tema == "escuro" else "#1e3a8a"};
     white-space: pre-line;
     font-size: 13.5px;
     font-weight: 600;
-}
+}}
 .st-key-demo_0 button:hover, .st-key-demo_1 button:hover,
-.st-key-demo_2 button:hover, .st-key-demo_3 button:hover {
-    border-color: #38bdf8; background: #dbeafe;
-}
+.st-key-demo_2 button:hover, .st-key-demo_3 button:hover {{
+    border-color: #38bdf8; background: {"#1e293b" if st.session_state.tema == "escuro" else "#dbeafe"};
+}}
+
+.tema-toggle-wrap {{position: absolute; top: 28px; right: 28px; z-index: 3;}}
+.st-key-tema_toggle_login button, .st-key-tema_toggle_app button {{
+    width: auto; border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 700;
+    background: {"rgba(255,255,255,0.10)" if st.session_state.tema == "escuro" else "#eff6ff"};
+    color: {"#e5e7eb" if st.session_state.tema == "escuro" else "#1e3a8a"};
+    border: 1.5px solid {"rgba(255,255,255,0.18)" if st.session_state.tema == "escuro" else "#bfdbfe"};
+}}
 
 /* ================================================================
    PÓS-LOGIN: sidebar + tela de Ordens de Serviço
    ================================================================ */
-.stApp {background: #f1f5f9;}
+.stApp {{background: {TEMA['app_bg']};}}
 
-.st-key-sidebar {
-    background: #0f172a;
+.st-key-sidebar {{
+    background: {TEMA['sidebar_bg']};
     min-height: 100vh;
     padding: 24px 16px;
     color: white;
-}
-.sidebar-brand {display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px;}
-.sidebar-brand-icon {
+}}
+.sidebar-brand {{display: flex; align-items: center; gap: 10px; padding: 0 8px 20px 8px;}}
+.sidebar-brand-icon {{
     background: #2563eb; border-radius: 10px; width: 38px; height: 38px;
     display: flex; align-items: center; justify-content: center; font-size: 17px;
-}
-.sidebar-brand-title {font-weight: 800; font-size: 14.5px; color: white; line-height: 1.1;}
-.sidebar-brand-sub {font-size: 10.5px; color: rgba(255,255,255,0.55);}
-.sidebar-section-label {
+}}
+.sidebar-brand-title {{font-weight: 800; font-size: 14.5px; color: white; line-height: 1.1;}}
+.sidebar-brand-sub {{font-size: 10.5px; color: rgba(255,255,255,0.55);}}
+.sidebar-section-label {{
     font-size: 10.5px; letter-spacing: 0.06em; color: rgba(255,255,255,0.45);
     text-transform: uppercase; margin: 14px 8px 6px 8px;
-}
-.st-key-sidebar .stButton>button {
+}}
+.st-key-sidebar .stButton>button {{
     background: transparent; color: rgba(255,255,255,0.75); border: none;
     text-align: left; font-weight: 500; font-size: 13.5px; padding: 8px 10px;
     border-radius: 8px;
-}
-.st-key-sidebar .stButton>button:hover {background: rgba(255,255,255,0.08); color: white;}
+}}
+.st-key-sidebar .stButton>button:hover {{background: rgba(255,255,255,0.08); color: white;}}
 
-.topbar-title {font-size: 22px; font-weight: 800; color: #0f172a;}
-.topbar-breadcrumb {font-size: 12.5px; color: #94a3b8; margin-bottom: 2px;}
-.topbar-sub {color: #64748b; font-size: 13.5px; margin: 4px 0 18px 0;}
+.topbar-title {{font-size: 22px; font-weight: 800; color: {TEMA['text_primary']};}}
+.topbar-breadcrumb {{font-size: 12.5px; color: {TEMA['text_muted']}; margin-bottom: 2px;}}
+.topbar-sub {{color: {TEMA['text_secondary']}; font-size: 13.5px; margin: 4px 0 18px 0;}}
 
-.status-badge {
+.status-badge {{
     display: inline-block; padding: 3px 10px; border-radius: 20px;
     font-size: 11.5px; font-weight: 700;
-}
-.status-aberto {background: #fee2e2; color: #b91c1c;}
-.status-em-andamento {background: #dbeafe; color: #1d4ed8;}
-.status-concluido {background: #dcfce7; color: #15803d;}
+}}
+.status-aberto {{background: #fee2e2; color: #b91c1c;}}
+.status-em-andamento {{background: #dbeafe; color: #1d4ed8;}}
+.status-concluido {{background: #dcfce7; color: #15803d;}}
 
-.os-row {border-bottom: 1px solid #e2e8f0; padding: 10px 0;}
-.os-header {font-size: 11.5px; letter-spacing: 0.04em; color: #94a3b8; text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid #e2e8f0;}
-.os-cell {font-size: 13.5px; color: #0f172a;}
-.os-cell-muted {font-size: 12px; color: #64748b;}
+.os-row {{border-bottom: 1px solid {TEMA['row_border']}; padding: 10px 0;}}
+.os-header {{font-size: 11.5px; letter-spacing: 0.04em; color: {TEMA['text_muted']}; text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid {TEMA['table_header_border']};}}
+.os-cell {{font-size: 13.5px; color: {TEMA['text_primary']};}}
+.os-cell-muted {{font-size: 12px; color: {TEMA['text_muted']};}}
 
-.st-key-topbar_search input {
-    border-radius: 8px !important; border: 1px solid #e2e8f0 !important;
-}
-.st-key-nova_os_btn button {background: #2563eb; color: white; border: none; font-weight: 700;}
-.st-key-nova_os_btn button:hover {background: #1d4ed8; color: white;}
-.st-key-logout_btn button {background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;}
+.st-key-topbar_search input {{
+    border-radius: 8px !important; border: 1px solid {TEMA['input_border']} !important;
+    background: {TEMA['input_bg']} !important; color: {TEMA['text_primary']} !important;
+}}
+.st-key-nova_os_btn button {{background: #2563eb; color: white; border: none; font-weight: 700;}}
+.st-key-nova_os_btn button:hover {{background: #1d4ed8; color: white;}}
+.st-key-logout_btn button {{background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;}}
 
 /* ---------- Tela de Máquinas: KPIs e gráficos ---------- */
-.kpi-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.kpi-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-left: 5px solid #2563eb;
     border-radius: 12px;
     padding: 16px 18px;
     margin-bottom: 8px;
-}
-.kpi-card.kpi-green {border-left-color: #16a34a;}
-.kpi-card.kpi-red {border-left-color: #dc2626;}
-.kpi-card.kpi-blue {border-left-color: #0ea5e9;}
-.kpi-value {font-size: 26px; font-weight: 800; color: #0f172a; line-height: 1.1;}
-.kpi-label {font-size: 12.5px; color: #64748b; margin-top: 4px;}
+}}
+.kpi-card.kpi-green {{border-left-color: #16a34a;}}
+.kpi-card.kpi-red {{border-left-color: #dc2626;}}
+.kpi-card.kpi-blue {{border-left-color: #0ea5e9;}}
+.kpi-value {{font-size: 26px; font-weight: 800; color: {TEMA['text_primary']}; line-height: 1.1;}}
+.kpi-label {{font-size: 12.5px; color: {TEMA['text_secondary']}; margin-top: 4px;}}
 
-.chart-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.chart-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-radius: 12px;
     padding: 18px 20px 6px 20px;
     margin-bottom: 16px;
-}
-.chart-title {font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 10px;}
+}}
+.chart-title {{font-size: 14px; font-weight: 700; color: {TEMA['text_primary']}; margin-bottom: 10px;}}
 
-.status-operando {background: #dcfce7; color: #15803d;}
-.status-parado {background: #fee2e2; color: #b91c1c;}
-.status-em-manutencao {background: #dbeafe; color: #1d4ed8;}
+.status-operando {{background: #dcfce7; color: #15803d;}}
+.status-parado {{background: #fee2e2; color: #b91c1c;}}
+.status-em-manutencao {{background: #dbeafe; color: #1d4ed8;}}
 
 /* ---------- Tela de Setores ---------- */
-.setor-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.setor-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-radius: 14px;
     padding: 20px 22px;
     height: 100%;
     box-sizing: border-box;
-}
-.setor-card-title {font-size: 16px; font-weight: 800; color: #0f172a; margin-bottom: 4px;}
-.setor-card-desc {font-size: 12.5px; color: #64748b; margin-bottom: 16px; min-height: 32px;}
-.setor-card-stats {display: flex; gap: 22px;}
-.setor-stat-value {font-size: 22px; font-weight: 800; color: #2563eb; line-height: 1;}
-.setor-stat-label {font-size: 11px; color: #94a3b8; margin-top: 3px;}
+}}
+.setor-card-title {{font-size: 16px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 4px;}}
+.setor-card-desc {{font-size: 12.5px; color: {TEMA['text_secondary']}; margin-bottom: 16px; min-height: 32px;}}
+.setor-card-stats {{display: flex; gap: 22px;}}
+.setor-stat-value {{font-size: 22px; font-weight: 800; color: #2563eb; line-height: 1;}}
+.setor-stat-label {{font-size: 11px; color: #94a3b8; margin-top: 3px;}}
 
 /* ---------- Tela de Almoxarifado — Peças ---------- */
-.estoque-baixo {color: #b91c1c; font-weight: 700;}
-.estoque-ok {color: #0f172a;}
+.estoque-baixo {{color: #b91c1c; font-weight: 700;}}
+.estoque-ok {{color: {TEMA['text_primary']};}}
 
 /* ---------- Tela de Ferramentas ---------- */
-.status-disponivel {background: #dcfce7; color: #15803d;}
-.status-solicitada {background: #fef9c3; color: #a16207;}
-.status-em-uso {background: #dbeafe; color: #1d4ed8;}
-.status-manutencao-calibracao {background: #ede9fe; color: #6d28d9;}
-.status-extraviada {background: #fee2e2; color: #b91c1c;}
+.status-disponivel {{background: #dcfce7; color: #15803d;}}
+.status-solicitada {{background: #fef9c3; color: #a16207;}}
+.status-em-uso {{background: #dbeafe; color: #1d4ed8;}}
+.status-manutencao-calibracao {{background: #ede9fe; color: #6d28d9;}}
+.status-extraviada {{background: #fee2e2; color: #b91c1c;}}
 
 /* ---------- Tela de Matriz de Risco / EPI ---------- */
-.risco-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
+.risco-card {{
+    background: {TEMA['card_bg']};
+    border: 1px solid {TEMA['card_border']};
     border-left: 5px solid #dc2626;
     border-radius: 14px;
     padding: 18px 20px;
     height: 100%;
     box-sizing: border-box;
-}
-.risco-card-title {font-size: 15px; font-weight: 800; color: #0f172a; margin-bottom: 8px;}
-.risco-card-epis {font-size: 12.5px; color: #475569; line-height: 1.5; margin-bottom: 12px;}
-.risco-card-tag {
+}}
+.risco-card-title {{font-size: 15px; font-weight: 800; color: {TEMA['text_primary']}; margin-bottom: 8px;}}
+.risco-card-epis {{font-size: 12.5px; color: {TEMA['text_secondary']}; line-height: 1.5; margin-bottom: 12px;}}
+.risco-card-tag {{
     display: inline-block; font-size: 11px; font-weight: 700; color: #b91c1c;
     background: #fee2e2; border-radius: 20px; padding: 3px 10px;
-}
+}}
 
 /* ---------- Tela de Usuários ---------- */
-.status-ativo {background: #dcfce7; color: #15803d;}
-.status-inativo {background: #f1f5f9; color: #64748b;}
-.status-em-campo {background: #dbeafe; color: #1d4ed8;}
-.status-ferias {background: #fef9c3; color: #a16207;}
-.status-afastado {background: #fee2e2; color: #b91c1c;}
-.user-avatar {
+.status-ativo {{background: #dcfce7; color: #15803d;}}
+.status-inativo {{background: #f1f5f9; color: #64748b;}}
+.status-em-campo {{background: #dbeafe; color: #1d4ed8;}}
+.status-ferias {{background: #fef9c3; color: #a16207;}}
+.status-afastado {{background: #fee2e2; color: #b91c1c;}}
+.user-avatar {{
     width: 34px; height: 34px; border-radius: 50%;
     background: #2563eb; color: #ffffff; font-weight: 700; font-size: 13px;
     display: flex; align-items: center; justify-content: center;
-}
-.user-name-cell {display: flex; align-items: center; gap: 10px;}
+}}
+.user-name-cell {{display: flex; align-items: center; gap: 10px;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -967,9 +1750,14 @@ if st.session_state.logged_in:
                 st.button(rotulo, key=f"nav_{chave}", on_click=ir_para, args=(chave,), use_container_width=True)
 
             st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+            with st.container(key="tema_toggle_app"):
+                icone_tema = "☀️ Modo claro" if st.session_state.tema == "escuro" else "🌙 Modo escuro"
+                st.button(icone_tema, on_click=alternar_tema, use_container_width=True)
+            st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
             with st.container(key="logout_btn"):
                 if st.button("Sair", use_container_width=True):
-                    do_logout()
+                    with st.spinner("Saindo..."):
+                        do_logout()
                     st.rerun()
 
     with col_main:
@@ -979,16 +1767,12 @@ if st.session_state.logged_in:
             st.markdown('<div class="topbar-title">Ordens de Serviço</div>', unsafe_allow_html=True)
         with top2:
             st.markdown(
-                f'<div style="text-align:right; font-size:13px; color:#0f172a;">'
+                f'<div style="text-align:right; font-size:13px; color:{TEMA["text_primary"]};">'
                 f'<b>{u["nome_usuario"]}</b><br>'
-                f'<span style="color:#64748b; font-size:11.5px;">{u["cargo_usuario"]}</span></div>',
+                f'<span style="color:{TEMA["text_muted"]}; font-size:11.5px;">{u["cargo_usuario"]}</span></div>',
                 unsafe_allow_html=True,
             )
 
-<<<<<<< HEAD
-=======
-
->>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina == "maquinas":
             st.markdown(
                 '<div class="topbar-sub">Cadastro completo dos equipamentos, integrado a Modelos_Maquinas e Setores.</div>',
@@ -996,7 +1780,8 @@ if st.session_state.logged_in:
             )
 
             try:
-                todas_maquinas = listar_maquinas()
+                with st.spinner("Carregando máquinas..."):
+                    todas_maquinas = listar_maquinas()
             except Exception as e:
                 st.error(f"Não foi possível carregar as máquinas: {e}")
                 todas_maquinas = []
@@ -1052,13 +1837,19 @@ if st.session_state.logged_in:
                     st.caption("Sem dados para exibir.")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            with st.container(key="topbar_search"):
-                st.text_input(
-                    "Buscar",
-                    key="maquinas_busca",
-                    placeholder="Buscar tag, máquina, fabricante, localização ou setor...",
-                    label_visibility="collapsed",
-                )
+            busca_col, botao_col = st.columns([3, 1])
+            with busca_col:
+                with st.container(key="topbar_search"):
+                    st.text_input(
+                        "Buscar",
+                        key="maquinas_busca",
+                        placeholder="Buscar tag, máquina, fabricante, localização ou setor...",
+                        label_visibility="collapsed",
+                    )
+            with botao_col:
+                with st.container(key="nova_maquina_btn"):
+                    if st.button("+ Nova Máquina", use_container_width=True, key="btn_nova_maquina"):
+                        dialog_nova_maquina()
 
             try:
                 maquinas = listar_maquinas(st.session_state.get("maquinas_busca", ""))
@@ -1071,14 +1862,15 @@ if st.session_state.logged_in:
             if not maquinas:
                 st.info("Nenhuma máquina encontrada.")
             else:
-                h1, h2, h3, h4, h5, h6, h7 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1])
-                for col, texto in zip((h1, h2, h3, h4, h5, h6, h7),
-                                       ("Tag", "Máquina / Modelo", "Fabricante", "Localização", "Setor", "Manutenção", "Status")):
+                h1, h2, h3, h4, h5, h6, h7, h8 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1, 0.9])
+                for col, texto in zip((h1, h2, h3, h4, h5, h6, h7, h8),
+                                       ("Tag", "Máquina / Modelo", "Fabricante", "Localização", "Setor", "Manutenção", "Status", "Ações")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in maquinas:
+                maquinas_pagina = paginar_lista(maquinas, "maquinas")
+                for row in maquinas_pagina:
                     with st.container(key=f"maq_row_{row['tag_equipamento']}"):
-                        c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1])
+                        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1, 2.2, 1.6, 1.8, 1.4, 1.3, 1.1, 0.9])
                         c1.markdown(f'<div class="os-cell"><b>{row["tag_equipamento"]}</b></div>', unsafe_allow_html=True)
                         c2.markdown(
                             f'<div class="os-cell">{row["nome_maquina"]}</div>'
@@ -1096,6 +1888,21 @@ if st.session_state.logged_in:
                         slug = status_slug(row["status_operacional"])
                         c7.markdown(f'<span class="status-badge status-{slug}">{row["status_operacional"]}</span>', unsafe_allow_html=True)
 
+                        with c8:
+                            b1, b2, b3 = st.columns(3)
+                            with b1:
+                                if st.button("📜", key=f"historico_maq_{row['tag_equipamento']}", help="Histórico de manutenção"):
+                                    dialog_historico_maquina(row)
+                            with b2:
+                                if st.button("✏️", key=f"editar_maq_{row['tag_equipamento']}"):
+                                    dialog_editar_maquina(row)
+                            with b3:
+                                if st.button("🗑️", key=f"excluir_maq_{row['tag_equipamento']}"):
+                                    dialog_confirmar_exclusao(
+                                        f"Excluir a máquina {row['tag_equipamento']} permanentemente?",
+                                        excluir_maquina, row["tag_equipamento"],
+                                    )
+
             st.stop()
 
         if st.session_state.pagina == "setores":
@@ -1104,8 +1911,13 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
+            with st.container(key="nova_setor_btn"):
+                if st.button("+ Novo Setor", key="btn_novo_setor"):
+                    dialog_novo_setor()
+
             try:
-                setores = listar_setores()
+                with st.spinner("Carregando setores..."):
+                    setores = listar_setores()
             except Exception as e:
                 st.error(f"Não foi possível carregar os setores: {e}")
                 setores = []
@@ -1126,6 +1938,16 @@ if st.session_state.logged_in:
 </div>
 </div>
 """, unsafe_allow_html=True)
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button("Editar", key=f"editar_setor_{s['id_setor']}", use_container_width=True):
+                                dialog_editar_setor(s)
+                        with bc2:
+                            if st.button("Excluir", key=f"excluir_setor_{s['id_setor']}", use_container_width=True):
+                                dialog_confirmar_exclusao(
+                                    f"Excluir o setor {s['nome_setor']} permanentemente?",
+                                    excluir_setor, s["id_setor"],
+                                )
                         st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1149,7 +1971,8 @@ if st.session_state.logged_in:
             )
 
             try:
-                todas_pecas = listar_pecas()
+                with st.spinner("Carregando almoxarifado..."):
+                    todas_pecas = listar_pecas()
             except Exception as e:
                 st.error(f"Não foi possível carregar o almoxarifado: {e}")
                 todas_pecas = []
@@ -1191,13 +2014,19 @@ if st.session_state.logged_in:
                     grafico_barras(df_top_qtd, "quantidade_estoque", cor_padrao="#0ea5e9", horizontal=True)
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            with st.container(key="topbar_search"):
-                st.text_input(
-                    "Buscar",
-                    key="pecas_busca",
-                    placeholder="Buscar peça pelo nome...",
-                    label_visibility="collapsed",
-                )
+            busca_col, botao_col = st.columns([3, 1])
+            with busca_col:
+                with st.container(key="topbar_search"):
+                    st.text_input(
+                        "Buscar",
+                        key="pecas_busca",
+                        placeholder="Buscar peça pelo nome...",
+                        label_visibility="collapsed",
+                    )
+            with botao_col:
+                with st.container(key="nova_peca_btn"):
+                    if st.button("+ Nova Peça", use_container_width=True, key="btn_nova_peca"):
+                        dialog_nova_peca()
 
             try:
                 pecas = listar_pecas(st.session_state.get("pecas_busca", ""))
@@ -1210,20 +2039,33 @@ if st.session_state.logged_in:
             if not pecas:
                 st.info("Nenhuma peça encontrada.")
             else:
-                h1, h2, h3, h4, h5 = st.columns([2.6, 1.2, 1.2, 1.3, 1.3])
-                for col, texto in zip((h1, h2, h3, h4, h5),
-                                       ("Peça", "Qtd. em estoque", "Unidade", "Custo unitário", "Valor total")):
+                h1, h2, h3, h4, h5, h6 = st.columns([2.4, 1.1, 1.1, 1.2, 1.2, 0.8])
+                for col, texto in zip((h1, h2, h3, h4, h5, h6),
+                                       ("Peça", "Qtd. em estoque", "Unidade", "Custo unitário", "Valor total", "Ações")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in pecas:
+                pecas_pagina = paginar_lista(pecas, "pecas")
+                for row in pecas_pagina:
                     with st.container(key=f"peca_row_{row['id_peca']}"):
-                        c1, c2, c3, c4, c5 = st.columns([2.6, 1.2, 1.2, 1.3, 1.3])
+                        c1, c2, c3, c4, c5, c6 = st.columns([2.4, 1.1, 1.1, 1.2, 1.2, 0.8])
                         c1.markdown(f'<div class="os-cell"><b>{row["nome_peca"]}</b></div>', unsafe_allow_html=True)
                         classe_qtd = "estoque-baixo" if row["quantidade_estoque"] < LIMITE_ESTOQUE_BAIXO else "estoque-ok"
                         c2.markdown(f'<div class="os-cell {classe_qtd}">{row["quantidade_estoque"]}</div>', unsafe_allow_html=True)
                         c3.markdown(f'<div class="os-cell">{row["unidade_medida"]}</div>', unsafe_allow_html=True)
                         c4.markdown(f'<div class="os-cell">R$ {row["custo_unitario"]:,.2f}</div>'.replace(",", "§").replace(".", ",").replace("§", "."), unsafe_allow_html=True)
                         c5.markdown(f'<div class="os-cell">R$ {row["valor_total"]:,.2f}</div>'.replace(",", "§").replace(".", ",").replace("§", "."), unsafe_allow_html=True)
+
+                        with c6:
+                            b1, b2 = st.columns(2)
+                            with b1:
+                                if st.button("✏️", key=f"editar_peca_{row['id_peca']}"):
+                                    dialog_editar_peca(row)
+                            with b2:
+                                if st.button("🗑️", key=f"excluir_peca_{row['id_peca']}"):
+                                    dialog_confirmar_exclusao(
+                                        f"Excluir a peça {row['nome_peca']} permanentemente?",
+                                        excluir_peca, row["id_peca"],
+                                    )
 
             st.stop()
 
@@ -1234,7 +2076,8 @@ if st.session_state.logged_in:
             )
 
             try:
-                todas_ferramentas = listar_ferramentas()
+                with st.spinner("Carregando ferramentas..."):
+                    todas_ferramentas = listar_ferramentas()
             except Exception as e:
                 st.error(f"Não foi possível carregar as ferramentas: {e}")
                 todas_ferramentas = []
@@ -1276,13 +2119,19 @@ if st.session_state.logged_in:
                 grafico_barras(df_ferr_status, "Quantidade", cores_mapa=STATUS_FERRAMENTA_CORES)
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            with st.container(key="topbar_search"):
-                st.text_input(
-                    "Buscar",
-                    key="ferramentas_busca",
-                    placeholder="Buscar ferramenta pelo nome...",
-                    label_visibility="collapsed",
-                )
+            busca_col, botao_col = st.columns([3, 1])
+            with busca_col:
+                with st.container(key="topbar_search"):
+                    st.text_input(
+                        "Buscar",
+                        key="ferramentas_busca",
+                        placeholder="Buscar ferramenta pelo nome...",
+                        label_visibility="collapsed",
+                    )
+            with botao_col:
+                with st.container(key="nova_ferramenta_btn"):
+                    if st.button("+ Nova Ferramenta", use_container_width=True, key="btn_nova_ferramenta"):
+                        dialog_nova_ferramenta()
 
             try:
                 ferramentas = listar_ferramentas(st.session_state.get("ferramentas_busca", ""))
@@ -1295,18 +2144,31 @@ if st.session_state.logged_in:
             if not ferramentas:
                 st.info("Nenhuma ferramenta encontrada.")
             else:
-                h1, h2, h3, h4 = st.columns([2.6, 1.4, 1.6, 1.6])
-                for col, texto in zip((h1, h2, h3, h4), ("Ferramenta", "Status", "Com quem", "Devolução prevista")):
+                h1, h2, h3, h4, h5 = st.columns([2.4, 1.3, 1.5, 1.5, 0.8])
+                for col, texto in zip((h1, h2, h3, h4, h5), ("Ferramenta", "Status", "Com quem", "Devolução prevista", "Ações")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in ferramentas:
+                ferramentas_pagina = paginar_lista(ferramentas, "ferramentas")
+                for row in ferramentas_pagina:
                     with st.container(key=f"ferr_row_{row['id_ferramenta']}"):
-                        c1, c2, c3, c4 = st.columns([2.6, 1.4, 1.6, 1.6])
+                        c1, c2, c3, c4, c5 = st.columns([2.4, 1.3, 1.5, 1.5, 0.8])
                         c1.markdown(f'<div class="os-cell"><b>{row["nome_ferramenta"]}</b></div>', unsafe_allow_html=True)
                         slug = status_slug(row["status_ferramenta"])
                         c2.markdown(f'<span class="status-badge status-{slug}">{row["status_ferramenta"]}</span>', unsafe_allow_html=True)
                         c3.markdown(f'<div class="os-cell">{row["com_quem"] or "—"}</div>', unsafe_allow_html=True)
                         c4.markdown(f'<div class="os-cell">{row["devolucao_prevista"] or "—"}</div>', unsafe_allow_html=True)
+
+                        with c5:
+                            b1, b2 = st.columns(2)
+                            with b1:
+                                if st.button("✏️", key=f"editar_ferr_{row['id_ferramenta']}"):
+                                    dialog_editar_ferramenta(row)
+                            with b2:
+                                if st.button("🗑️", key=f"excluir_ferr_{row['id_ferramenta']}"):
+                                    dialog_confirmar_exclusao(
+                                        f"Excluir a ferramenta {row['nome_ferramenta']} permanentemente?",
+                                        excluir_ferramenta, row["id_ferramenta"],
+                                    )
 
             st.stop()
 
@@ -1316,8 +2178,13 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
+            with st.container(key="novo_risco_btn"):
+                if st.button("+ Novo Risco", key="btn_novo_risco"):
+                    dialog_novo_risco()
+
             try:
-                riscos = listar_riscos()
+                with st.spinner("Carregando matriz de riscos..."):
+                    riscos = listar_riscos()
             except Exception as e:
                 st.error(f"Não foi possível carregar a matriz de riscos: {e}")
                 riscos = []
@@ -1348,6 +2215,16 @@ if st.session_state.logged_in:
 <span class="risco-card-tag">{r["total_os"]} OS vinculada(s)</span>
 </div>
 """, unsafe_allow_html=True)
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button("Editar", key=f"editar_risco_{r['id_risco']}", use_container_width=True):
+                                dialog_editar_risco(r)
+                        with bc2:
+                            if st.button("Excluir", key=f"excluir_risco_{r['id_risco']}", use_container_width=True):
+                                dialog_confirmar_exclusao(
+                                    f"Excluir o risco {r['risco_nr01']} permanentemente?",
+                                    excluir_risco, r["id_risco"],
+                                )
                         st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1365,7 +2242,8 @@ if st.session_state.logged_in:
             )
 
             try:
-                todos_usuarios = listar_usuarios()
+                with st.spinner("Carregando usuários..."):
+                    todos_usuarios = listar_usuarios()
             except Exception as e:
                 st.error(f"Não foi possível carregar os usuários: {e}")
                 todos_usuarios = []
@@ -1419,13 +2297,19 @@ if st.session_state.logged_in:
                         st.caption("Nenhum técnico cadastrado.")
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            with st.container(key="topbar_search"):
-                st.text_input(
-                    "Buscar",
-                    key="usuarios_busca",
-                    placeholder="Buscar por nome, e-mail, cargo ou setor...",
-                    label_visibility="collapsed",
-                )
+            busca_col, botao_col = st.columns([3, 1])
+            with busca_col:
+                with st.container(key="topbar_search"):
+                    st.text_input(
+                        "Buscar",
+                        key="usuarios_busca",
+                        placeholder="Buscar por nome, e-mail, cargo ou setor...",
+                        label_visibility="collapsed",
+                    )
+            with botao_col:
+                with st.container(key="novo_usuario_btn"):
+                    if st.button("+ Novo Usuário", use_container_width=True, key="btn_novo_usuario"):
+                        dialog_novo_usuario()
 
             try:
                 usuarios = listar_usuarios(st.session_state.get("usuarios_busca", ""))
@@ -1438,14 +2322,15 @@ if st.session_state.logged_in:
             if not usuarios:
                 st.info("Nenhum usuário encontrado.")
             else:
-                h1, h2, h3, h4, h5, h6 = st.columns([2.2, 1.4, 1.4, 1.1, 1.4, 1.3])
-                for col, texto in zip((h1, h2, h3, h4, h5, h6),
-                                       ("Usuário", "Cargo", "Setor", "Status", "Disponibilidade", "Telefone")):
+                h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 1.3, 1.3, 1, 1.3, 1.2, 0.8])
+                for col, texto in zip((h1, h2, h3, h4, h5, h6, h7),
+                                       ("Usuário", "Cargo", "Setor", "Status", "Disponibilidade", "Telefone", "Ações")):
                     col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-                for row in usuarios:
+                usuarios_pagina = paginar_lista(usuarios, "usuarios")
+                for row in usuarios_pagina:
                     with st.container(key=f"user_row_{row['id_usuario']}"):
-                        c1, c2, c3, c4, c5, c6 = st.columns([2.2, 1.4, 1.4, 1.1, 1.4, 1.3])
+                        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1.3, 1.3, 1, 1.3, 1.2, 0.8])
                         iniciais = "".join(p[0].upper() for p in row["nome_usuario"].split()[:2])
                         c1.markdown(
                             f'<div class="user-name-cell"><div class="user-avatar">{iniciais}</div>'
@@ -1468,6 +2353,18 @@ if st.session_state.logged_in:
                             c5.markdown('<div class="os-cell-muted">—</div>', unsafe_allow_html=True)
                         c6.markdown(f'<div class="os-cell">{row["telefone_usuario"]}</div>', unsafe_allow_html=True)
 
+                        with c7:
+                            b1, b2 = st.columns(2)
+                            with b1:
+                                if st.button("✏️", key=f"editar_user_{row['id_usuario']}"):
+                                    dialog_editar_usuario(row)
+                            with b2:
+                                if st.button("🗑️", key=f"excluir_user_{row['id_usuario']}"):
+                                    dialog_confirmar_exclusao(
+                                        f"Excluir o usuário {row['nome_usuario']} permanentemente?",
+                                        excluir_usuario, row["id_usuario"],
+                                    )
+
             st.stop()
 
         if st.session_state.pagina == "dashboard":
@@ -1476,26 +2373,27 @@ if st.session_state.logged_in:
                 unsafe_allow_html=True,
             )
 
-            try:
-                ordens_dash = listar_ordens_servico()
-            except Exception as e:
-                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
-                ordens_dash = []
-            try:
-                maquinas_dash = listar_maquinas()
-            except Exception as e:
-                st.error(f"Não foi possível carregar as máquinas: {e}")
-                maquinas_dash = []
-            try:
-                pecas_dash = listar_pecas()
-            except Exception as e:
-                st.error(f"Não foi possível carregar o almoxarifado: {e}")
-                pecas_dash = []
-            try:
-                usuarios_dash = listar_usuarios()
-            except Exception as e:
-                st.error(f"Não foi possível carregar os usuários: {e}")
-                usuarios_dash = []
+            with st.spinner("Carregando dashboard..."):
+                try:
+                    ordens_dash = listar_ordens_servico()
+                except Exception as e:
+                    st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                    ordens_dash = []
+                try:
+                    maquinas_dash = listar_maquinas()
+                except Exception as e:
+                    st.error(f"Não foi possível carregar as máquinas: {e}")
+                    maquinas_dash = []
+                try:
+                    pecas_dash = listar_pecas()
+                except Exception as e:
+                    st.error(f"Não foi possível carregar o almoxarifado: {e}")
+                    pecas_dash = []
+                try:
+                    usuarios_dash = listar_usuarios()
+                except Exception as e:
+                    st.error(f"Não foi possível carregar os usuários: {e}")
+                    usuarios_dash = []
 
             LIMITE_ESTOQUE_BAIXO = 10
 
@@ -1630,21 +2528,42 @@ if st.session_state.logged_in:
 
         if st.session_state.pagina == "agenda":
             st.markdown(
-                '<div class="topbar-sub">Programação das Ordens de Serviço por data e técnico.</div>',
+                '<div class="topbar-sub">Programação das Ordens de Serviço por data e técnico — integrada ao Google Calendar.</div>',
                 unsafe_allow_html=True,
             )
 
+            gcal_ativo = google_calendar_configurado()
+            erro_gcal = st.session_state.get("google_calendar_erro")
+
+            if not gcal_ativo:
+                st.info(
+                    "Google Calendar não configurado. Adicione a seção [google_calendar] em "
+                    "secrets.toml para sincronizar as OS com um calendário compartilhado."
+                )
+            elif erro_gcal:
+                st.warning(f"Google Calendar: {erro_gcal}")
+
             try:
-                ordens_agenda = listar_ordens_servico()
+                with st.spinner("Carregando ordens de serviço..."):
+                    ordens_agenda = listar_ordens_servico()
             except Exception as e:
                 st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
                 ordens_agenda = []
 
             hoje = agora_brasil().date()
 
-            f1, f2 = st.columns([1, 3])
+            f1, f2, f3 = st.columns([1, 2, 1])
             with f1:
                 data_selecionada = st.date_input("Ver ordens do dia", value=hoje, key="agenda_data")
+            with f3:
+                st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+                if st.button("🔄 Sincronizar agora", disabled=not gcal_ativo, use_container_width=True):
+                    with st.spinner("Sincronizando com o Google Calendar..."):
+                        qtd = sincronizar_intervalo_com_google(
+                            ordens_agenda, hoje - timedelta(days=1), hoje + timedelta(days=7)
+                        )
+                    st.success(f"{qtd} OS sincronizada(s) com o Google Calendar.")
+                    st.rerun()
 
             os_do_dia = [o for o in ordens_agenda if o["data_abertura"] == data_selecionada]
             os_do_dia.sort(key=lambda o: (o["hh_inicio"] is None, o["hh_inicio"]))
@@ -1654,7 +2573,10 @@ if st.session_state.logged_in:
                 if o["data_abertura"] and hoje <= o["data_abertura"] <= hoje + timedelta(days=7)
             ]
 
-            k1, k2, k3 = st.columns(3)
+            eventos_dia = buscar_eventos_google(data_selecionada, data_selecionada) if gcal_ativo else []
+            eventos_externos_dia = [ev for ev in eventos_dia if ev["externo"]]
+
+            k1, k2, k3, k4 = st.columns(4)
             k1.markdown(
                 f'<div class="kpi-card"><div class="kpi-value">{len(os_do_dia)}</div>'
                 f'<div class="kpi-label">OS na data selecionada</div></div>', unsafe_allow_html=True)
@@ -1665,6 +2587,9 @@ if st.session_state.logged_in:
             k3.markdown(
                 f'<div class="kpi-card kpi-red"><div class="kpi-value">{pendentes_total}</div>'
                 f'<div class="kpi-label">OS pendentes no total</div></div>', unsafe_allow_html=True)
+            k4.markdown(
+                f'<div class="kpi-card" style="border-left-color:#6d28d9;"><div class="kpi-value">{len(eventos_externos_dia)}</div>'
+                f'<div class="kpi-label">Eventos externos no Google (data selecionada)</div></div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1688,6 +2613,25 @@ if st.session_state.logged_in:
                         slug = status_slug(row["status_os"])
                         c5.markdown(f'<span class="status-badge status-{slug}">{row["status_os"]}</span>', unsafe_allow_html=True)
 
+            if gcal_ativo:
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="chart-title">Eventos externos do Google Calendar em {data_selecionada.strftime("%d/%m/%Y")}</div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption("Eventos criados diretamente no calendário compartilhado, sem OS correspondente no sistema.")
+                if not eventos_externos_dia:
+                    st.info("Nenhum evento externo nesta data.")
+                else:
+                    for ev in eventos_externos_dia:
+                        st.markdown(
+                            f'<div class="os-row"><b>{ev["titulo"]}</b><br>'
+                            f'<span class="os-cell-muted">{ev["inicio"]} → {ev["fim"]}'
+                            + (f' · <a href="{ev["link"]}" target="_blank">abrir no Google</a>' if ev.get("link") else "")
+                            + '</span></div>',
+                            unsafe_allow_html=True,
+                        )
+
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<div class="chart-title">Próximos 7 dias</div>', unsafe_allow_html=True)
             for i in range(7):
@@ -1709,7 +2653,8 @@ if st.session_state.logged_in:
             )
 
             try:
-                ordens_rel = listar_ordens_servico()
+                with st.spinner("Carregando ordens de serviço..."):
+                    ordens_rel = listar_ordens_servico()
             except Exception as e:
                 st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
                 ordens_rel = []
@@ -1804,6 +2749,68 @@ if st.session_state.logged_in:
                 st.caption("Sem dados para o período/técnico selecionado.")
             st.markdown("</div>", unsafe_allow_html=True)
 
+            # ---------------------------------------------------------------
+            # Indicadores de Manutenção (MTTR, MTBF, backlog por idade e
+            # disponibilidade dos equipamentos), calculados sobre o mesmo
+            # recorte de período/técnico já aplicado acima.
+            # ---------------------------------------------------------------
+            try:
+                maquinas_rel = listar_maquinas()
+            except Exception as e:
+                st.error(f"Não foi possível carregar as máquinas para calcular a disponibilidade: {e}")
+                maquinas_rel = []
+
+            indicadores = calcular_indicadores_manutencao(df_filtro, maquinas_rel)
+
+            mttr_display = (
+                f"{indicadores['mttr_horas']:.1f} h" if indicadores["mttr_horas"] is not None else "—"
+            )
+            mtbf_display = (
+                f"{indicadores['mtbf_dias']:.1f} d" if indicadores["mtbf_dias"] is not None else "—"
+            )
+            disponibilidade_display = (
+                f"{indicadores['disponibilidade_pct']:.1f}%" if indicadores["disponibilidade_pct"] is not None else "—"
+            )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="chart-title">Indicadores de Manutenção</div>', unsafe_allow_html=True)
+            st.caption(
+                "MTTR e MTBF consideram apenas OS com horário de início/fim válidos; a "
+                "disponibilidade reflete o cadastro atual de máquinas (não é filtrada por período)."
+            )
+
+            i1, i2, i3, i4 = st.columns(4)
+            i1.markdown(
+                f'<div class="kpi-card kpi-blue"><div class="kpi-value">{mttr_display}</div>'
+                f'<div class="kpi-label">MTTR · Tempo médio de reparo</div></div>', unsafe_allow_html=True)
+            i2.markdown(
+                f'<div class="kpi-card kpi-green"><div class="kpi-value">{mtbf_display}</div>'
+                f'<div class="kpi-label">MTBF · Tempo médio entre falhas</div></div>', unsafe_allow_html=True)
+            i3.markdown(
+                f'<div class="kpi-card kpi-red"><div class="kpi-value">{indicadores["backlog_total"]}</div>'
+                f'<div class="kpi-label">Backlog · OS pendentes no período</div></div>', unsafe_allow_html=True)
+            i4.markdown(
+                f'<div class="kpi-card"><div class="kpi-value">{disponibilidade_display}</div>'
+                f'<div class="kpi-label">Disponibilidade dos equipamentos</div></div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            gi1, gi2 = st.columns(2)
+            with gi1:
+                st.markdown('<div class="chart-card"><div class="chart-title">Backlog de manutenção por idade</div>', unsafe_allow_html=True)
+                if not indicadores["df_backlog"].empty:
+                    grafico_barras(indicadores["df_backlog"], "Quantidade", cor_padrao="#dc2626")
+                else:
+                    st.caption("Nenhuma OS pendente no período/técnico selecionado.")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with gi2:
+                st.markdown('<div class="chart-card"><div class="chart-title">MTTR ao longo do tempo (horas)</div>', unsafe_allow_html=True)
+                if not indicadores["mttr_mensal"].empty:
+                    grafico_area(indicadores["mttr_mensal"], "MTTR (h)", cor="#dc2626")
+                else:
+                    st.caption("Sem OS concluídas com horários registrados no período.")
+                st.markdown("</div>", unsafe_allow_html=True)
+
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<div class="chart-title">Detalhamento das Ordens de Serviço</div>', unsafe_allow_html=True)
             if df_filtro.empty:
@@ -1828,10 +2835,6 @@ if st.session_state.logged_in:
 
             st.stop()
 
-<<<<<<< HEAD
-=======
-
->>>>>>> c9f8e942e18a3212c0fd58fc5b0f8a6b071a5b1f
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
             st.info("Em construção — por enquanto Ordens de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
@@ -1857,7 +2860,8 @@ if st.session_state.logged_in:
                     dialog_nova_os()
 
         try:
-            ordens = listar_ordens_servico(st.session_state.os_busca)
+            with st.spinner("Carregando ordens de serviço..."):
+                ordens = listar_ordens_servico(st.session_state.os_busca)
         except Exception as e:
             st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
             ordens = []
@@ -1872,7 +2876,8 @@ if st.session_state.logged_in:
                                    ("OS", "Equipamento", "Descrição", "Abertura", "Técnico", "Status", "Ações")):
                 col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
-            for row in ordens:
+            ordens_pagina = paginar_lista(ordens, "ordens_servico")
+            for row in ordens_pagina:
                 with st.container(key=f"os_row_{row['id_os']}"):
                     c1, c2, c3, c4, c5, c6, c7 = st.columns([0.6, 1, 2.4, 1.3, 1.2, 1, 0.8])
                     c1.markdown(f'<div class="os-cell">#{row["id_os"]}</div>', unsafe_allow_html=True)
@@ -1894,29 +2899,18 @@ if st.session_state.logged_in:
                                 dialog_editar_os(row)
                         with b2:
                             if st.button("🗑️", key=f"excluir_{row['id_os']}"):
-                                st.session_state.os_confirmar_exclusao = row["id_os"]
-
-                    if st.session_state.os_confirmar_exclusao == row["id_os"]:
-                        st.warning(f"Excluir a OS #{row['id_os']} permanentemente?")
-                        cc1, cc2 = st.columns(2)
-                        with cc1:
-                            if st.button("Sim, excluir", key=f"confirma_excluir_{row['id_os']}", type="primary"):
-                                try:
-                                    excluir_os(row["id_os"])
-                                    st.session_state.os_confirmar_exclusao = None
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Erro ao excluir: {e}")
-                        with cc2:
-                            if st.button("Cancelar", key=f"cancela_excluir_{row['id_os']}"):
-                                st.session_state.os_confirmar_exclusao = None
-                                st.rerun()
+                                dialog_confirmar_exclusao(
+                                    f"Excluir a OS #{row['id_os']} ({row['tag_equipamento']}) permanentemente?",
+                                    excluir_os, row["id_os"],
+                                )
 
     st.stop()
 
 # ------------------------------------------------------------------
 # TELA DE LOGIN — estilo "foguete", tons de azul, tela inteira
 # ------------------------------------------------------------------
+segundos_bloqueio_restantes = login_bloqueado()
+
 with st.container(key="unified_panel"):
 
     # ---------- Painel esquerdo: decorativo (foguete + gradiente multi-tom) ----------
@@ -1946,15 +2940,33 @@ Gestão inteligente da manutenção industrial.
 
     # ---------- Painel direito: cartão de login (cobre a tela inteira) ----------
     with st.container(key="login_card"):
-        st.markdown('<div class="login-eyebrow">Bem-vindo de volta</div>', unsafe_allow_html=True)
+        top_login1, top_login2 = st.columns([3, 1])
+        with top_login1:
+            st.markdown('<div class="login-eyebrow">Bem-vindo de volta</div>', unsafe_allow_html=True)
+        with top_login2:
+            with st.container(key="tema_toggle_login"):
+                icone_tema = "☀️ Claro" if st.session_state.tema == "escuro" else "🌙 Escuro"
+                st.button(icone_tema, on_click=alternar_tema, use_container_width=True)
+
         st.markdown('<div class="login-title">Acesse sua conta</div>', unsafe_allow_html=True)
         st.markdown('<div class="login-sub">Entre com suas credenciais corporativas para continuar.</div>', unsafe_allow_html=True)
 
         if st.session_state.db_error:
             st.error(f"Não foi possível conectar ao banco:\n\n{st.session_state.db_error}")
 
-        st.text_input("👤  E-mail", key="email_input", placeholder="nome@empresa.com")
-        st.text_input("🔒  Senha", key="senha_input", type="password", placeholder="••••••••")
+        if segundos_bloqueio_restantes > 0:
+            st.warning(
+                f"Muitas tentativas de login incorretas. Tente novamente em {segundos_bloqueio_restantes} segundo(s)."
+            )
+
+        st.text_input(
+            "👤  E-mail", key="email_input", placeholder="nome@empresa.com",
+            disabled=segundos_bloqueio_restantes > 0,
+        )
+        st.text_input(
+            "🔒  Senha", key="senha_input", type="password", placeholder="••••••••",
+            disabled=segundos_bloqueio_restantes > 0,
+        )
 
         st.markdown(
             '<div class="login-row"><span>☐ Lembrar de mim</span>'
@@ -1962,12 +2974,13 @@ Gestão inteligente da manutenção industrial.
             unsafe_allow_html=True,
         )
 
-        if st.session_state.get("login_error"):
-            st.error("E-mail ou senha inválidos.")
+        if st.session_state.get("login_error") and segundos_bloqueio_restantes == 0:
+            tentativas_restantes = max(LIMITE_TENTATIVAS_LOGIN - st.session_state.login_tentativas, 0)
+            st.error(f"E-mail ou senha inválidos. Tentativas restantes: {tentativas_restantes}.")
             st.session_state.login_error = False
 
         with st.container(key="entrar_btn_wrap"):
-            st.button("→  Entrar", on_click=do_login)
+            st.button("→  Entrar", on_click=do_login, disabled=segundos_bloqueio_restantes > 0)
 
         st.markdown('<div class="demo-label">Acesso rápido (usuários reais)</div>', unsafe_allow_html=True)
 
@@ -1976,8 +2989,16 @@ Gestão inteligente da manutenção industrial.
         for idx, (cargo, email, senha) in enumerate(ACESSO_RAPIDO_USERS):
             with colunas[idx]:
                 with st.container(key=f"demo_{idx}"):
-                    st.button(f"{cargo}\n{email}", key=f"btn_demo_{idx}",
-                              on_click=quick_login, args=(email, senha))
+                    st.button(
+                        f"{cargo}\n{email}", key=f"btn_demo_{idx}",
+                        on_click=quick_login, args=(email, senha),
+                        disabled=segundos_bloqueio_restantes > 0,
+                    )
 
         if st.session_state.logged_in:
+            st.rerun()
+
+        if segundos_bloqueio_restantes > 0:
+            import time
+            time.sleep(1)
             st.rerun()
