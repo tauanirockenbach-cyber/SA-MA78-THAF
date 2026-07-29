@@ -1,3 +1,5 @@
+# Versao atualizada do app
+
 import hashlib
 import json
 from datetime import datetime, timedelta, time as dt_time
