@@ -1,5 +1,3 @@
-# Versao atualizada do app
-
 import hashlib
 import json
 from datetime import datetime, timedelta, time as dt_time
@@ -27,8 +25,8 @@ def agora_brasil():
 
 
 st.set_page_config(
-    page_title="THAF Manutenção - Login",
-    page_icon="🔧",
+    page_title="Portal da Manutenção - Login",
+    page_icon="🛠️",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -152,7 +150,7 @@ def _construir_evento_os(os_info: dict):
             f"{os_info.get('descricao_falha') or ''}\n\n"
             f"Técnico: {os_info.get('tecnico') or '—'}\n"
             f"Status: {os_info.get('status_os')}\n"
-            f"Gerado automaticamente pelo THAF Manutenção."
+            f"Gerado automaticamente pelo Portal da Manutenção."
         ),
         "start": {"dateTime": inicio_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
         "end": {"dateTime": fim_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
@@ -200,7 +198,7 @@ def sincronizar_os_google(os_info: dict):
         buscar_eventos_google.clear()
         return evento
     except Exception as e:
-        st.session_state["google_calendar_erro"] = f"Falha ao sincronizar OS #{os_info['id_os']} com o Google: {e}"
+        st.session_state["google_calendar_erro"] = f"Falha ao sincronizar SS #{os_info['id_os']} com o Google: {e}"
         return None
 
 
@@ -215,7 +213,7 @@ def excluir_evento_google(id_os):
             buscar_eventos_google.clear()
         st.session_state["google_calendar_erro"] = None
     except Exception as e:
-        st.session_state["google_calendar_erro"] = f"Falha ao remover evento da OS #{id_os} no Google: {e}"
+        st.session_state["google_calendar_erro"] = f"Falha ao remover evento da SS #{id_os} no Google: {e}"
 
 
 @st.cache_data(ttl=30)
@@ -1258,6 +1256,491 @@ def dialog_historico_maquina(row):
             f'</div>',
             unsafe_allow_html=True,
         )
+
+
+# ============================================================================
+# SETORES — CRUD (criar/atualizar) + dialogs
+# ============================================================================
+def criar_setor(nome_setor, descricao_setor):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO Setores (nome_setor, descricao_setor) VALUES (%s, %s)",
+                (nome_setor, descricao_setor),
+            )
+    finally:
+        conn.close()
+    listar_setores.clear()
+
+
+def atualizar_setor(id_setor, nome_setor, descricao_setor):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE Setores SET nome_setor = %s, descricao_setor = %s WHERE id_setor = %s",
+                (nome_setor, descricao_setor, id_setor),
+            )
+    finally:
+        conn.close()
+    listar_setores.clear()
+
+
+@st.dialog("Novo Setor")
+def dialog_novo_setor():
+    nome = st.text_input("Nome do setor", placeholder="Ex: Manutenção Mecânica")
+    descricao = st.text_area("Descrição", placeholder="Descrição opcional do setor")
+
+    if st.button("Salvar Setor", type="primary"):
+        if not nome:
+            st.error("Informe o nome do setor.")
+        else:
+            with st.spinner("Salvando setor..."):
+                try:
+                    criar_setor(nome, descricao or None)
+                    st.success("Setor criado com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Setor")
+def dialog_editar_setor(row):
+    nome = st.text_input("Nome do setor", value=row["nome_setor"])
+    descricao = st.text_area("Descrição", value=row["descricao_setor"] or "")
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_setor(row["id_setor"], nome, descricao or None)
+                st.success("Setor atualizado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+# ============================================================================
+# ALMOXARIFADO — PEÇAS — CRUD (criar/atualizar) + dialogs
+# ============================================================================
+def criar_peca(nome_peca, quantidade_estoque, unidade_medida, custo_unitario):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO Almoxarifado_Pecas
+                    (nome_peca, quantidade_estoque, unidade_medida, custo_unitario)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (nome_peca, quantidade_estoque, unidade_medida, custo_unitario),
+            )
+    finally:
+        conn.close()
+    listar_pecas.clear()
+
+
+def atualizar_peca(id_peca, nome_peca, quantidade_estoque, unidade_medida, custo_unitario):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE Almoxarifado_Pecas
+                SET nome_peca = %s, quantidade_estoque = %s,
+                    unidade_medida = %s, custo_unitario = %s
+                WHERE id_peca = %s
+                """,
+                (nome_peca, quantidade_estoque, unidade_medida, custo_unitario, id_peca),
+            )
+    finally:
+        conn.close()
+    listar_pecas.clear()
+
+
+@st.dialog("Nova Peça")
+def dialog_nova_peca():
+    nome = st.text_input("Nome da peça", placeholder="Ex: Rolamento 6205")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        quantidade = st.number_input("Quantidade em estoque", min_value=0, step=1)
+    with c2:
+        unidade = st.text_input("Unidade de medida", placeholder="Ex: UN, KG, M")
+    with c3:
+        custo = st.number_input("Custo unitário (R$)", min_value=0.0, step=0.01, format="%.2f")
+
+    if st.button("Salvar Peça", type="primary"):
+        if not nome or not unidade:
+            st.error("Preencha nome e unidade de medida.")
+        else:
+            with st.spinner("Salvando peça..."):
+                try:
+                    criar_peca(nome, int(quantidade), unidade, float(custo))
+                    st.success("Peça criada com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Peça")
+def dialog_editar_peca(row):
+    nome = st.text_input("Nome da peça", value=row["nome_peca"])
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        quantidade = st.number_input(
+            "Quantidade em estoque", min_value=0, step=1,
+            value=int(row["quantidade_estoque"]),
+        )
+    with c2:
+        unidade = st.text_input("Unidade de medida", value=row["unidade_medida"])
+    with c3:
+        custo = st.number_input(
+            "Custo unitário (R$)", min_value=0.0, step=0.01, format="%.2f",
+            value=float(row["custo_unitario"]),
+        )
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_peca(row["id_peca"], nome, int(quantidade), unidade, float(custo))
+                st.success("Peça atualizada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+# ============================================================================
+# FERRAMENTAS — CRUD (criar/atualizar) + dialogs
+# ============================================================================
+def criar_ferramenta(nome_ferramenta, status_ferramenta):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO Almoxarifado_Ferramentas (nome_ferramenta, status_ferramenta) VALUES (%s, %s)",
+                (nome_ferramenta, status_ferramenta),
+            )
+    finally:
+        conn.close()
+    listar_ferramentas.clear()
+
+
+def atualizar_ferramenta(id_ferramenta, nome_ferramenta, status_ferramenta):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE Almoxarifado_Ferramentas SET nome_ferramenta = %s, status_ferramenta = %s WHERE id_ferramenta = %s",
+                (nome_ferramenta, status_ferramenta, id_ferramenta),
+            )
+    finally:
+        conn.close()
+    listar_ferramentas.clear()
+
+
+STATUS_FERRAMENTA_OPCOES = list(STATUS_FERRAMENTA_CORES.keys())
+
+
+@st.dialog("Nova Ferramenta")
+def dialog_nova_ferramenta():
+    nome = st.text_input("Nome da ferramenta", placeholder='Ex: Torquímetro 1/2"')
+    status = st.selectbox("Status", STATUS_FERRAMENTA_OPCOES)
+
+    if st.button("Salvar Ferramenta", type="primary"):
+        if not nome:
+            st.error("Informe o nome da ferramenta.")
+        else:
+            with st.spinner("Salvando ferramenta..."):
+                try:
+                    criar_ferramenta(nome, status)
+                    st.success("Ferramenta criada com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Ferramenta")
+def dialog_editar_ferramenta(row):
+    nome = st.text_input("Nome da ferramenta", value=row["nome_ferramenta"])
+    status = st.selectbox(
+        "Status", STATUS_FERRAMENTA_OPCOES,
+        index=STATUS_FERRAMENTA_OPCOES.index(row["status_ferramenta"])
+        if row["status_ferramenta"] in STATUS_FERRAMENTA_OPCOES else 0,
+    )
+    st.caption(
+        "⚠️ Alterar o status aqui não cria/fecha registros em "
+        "Movimentacao_Ferramentas — use esta tela só para correções de cadastro."
+    )
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_ferramenta(row["id_ferramenta"], nome, status)
+                st.success("Ferramenta atualizada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+# ============================================================================
+# MATRIZ DE RISCOS / EPI — CRUD (criar/atualizar) + dialogs
+# ============================================================================
+def criar_risco(risco_nr01, epis_obrigatorios):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO Matriz_Riscos_EPI (risco_nr01, epis_obrigatorios) VALUES (%s, %s)",
+                (risco_nr01, epis_obrigatorios),
+            )
+    finally:
+        conn.close()
+    listar_riscos.clear()
+
+
+def atualizar_risco(id_risco, risco_nr01, epis_obrigatorios):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE Matriz_Riscos_EPI SET risco_nr01 = %s, epis_obrigatorios = %s WHERE id_risco = %s",
+                (risco_nr01, epis_obrigatorios, id_risco),
+            )
+    finally:
+        conn.close()
+    listar_riscos.clear()
+
+
+@st.dialog("Novo Risco")
+def dialog_novo_risco():
+    risco = st.text_input("Risco (NR-01)", placeholder="Ex: Risco de queda de altura")
+    epis = st.text_area("EPIs obrigatórios", placeholder="Ex: Capacete, cinto de segurança, luvas")
+
+    if st.button("Salvar Risco", type="primary"):
+        if not risco or not epis:
+            st.error("Preencha o risco e os EPIs obrigatórios.")
+        else:
+            with st.spinner("Salvando risco..."):
+                try:
+                    criar_risco(risco, epis)
+                    st.success("Risco criado com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Risco")
+def dialog_editar_risco(row):
+    risco = st.text_input("Risco (NR-01)", value=row["risco_nr01"])
+    epis = st.text_area("EPIs obrigatórios", value=row["epis_obrigatorios"])
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_risco(row["id_risco"], risco, epis)
+                st.success("Risco atualizado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+# ============================================================================
+# USUÁRIOS — CRUD (criar/atualizar) + dialogs
+#
+# AJUSTE as listas abaixo para o domínio real das colunas no seu MySQL,
+# se houver ENUM/CHECK com valores diferentes destes:
+# ============================================================================
+CARGO_USUARIO_OPCOES = ["CEO", "Gerente", "Supervisor", "Tecnico"]
+STATUS_USUARIO_OPCOES = ["Ativo", "Inativo"]
+DISPONIBILIDADE_TECNICO_OPCOES = ["Disponível", "Em Campo", "Férias", "Afastado"]
+NIVEL_EXPERIENCIA_OPCOES = ["Júnior", "Pleno", "Sênior"]
+
+
+def criar_usuario(nome_usuario, email_usuario, senha, cargo_usuario, status_usuario,
+                   nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                   data_nasc_usuario, id_setor):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO Usuarios
+                    (nome_usuario, email_usuario, senha, cargo_usuario, status_usuario,
+                     nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                     data_nasc_usuario, data_cadastro, id_setor)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    nome_usuario, email_usuario.strip().lower(), hash_senha(senha),
+                    cargo_usuario, status_usuario, nivel_experiencia, disponibilidade_tecnico,
+                    telefone_usuario, data_nasc_usuario, agora_brasil(), id_setor,
+                ),
+            )
+    finally:
+        conn.close()
+    listar_usuarios.clear()
+    listar_setores.clear()   # total_usuarios por setor muda
+    listar_tecnicos.clear()  # se o novo usuário for técnico ativo
+
+
+def atualizar_usuario(id_usuario, nome_usuario, email_usuario, cargo_usuario, status_usuario,
+                       nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                       data_nasc_usuario, id_setor, nova_senha=None):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if nova_senha:
+                cur.execute(
+                    """
+                    UPDATE Usuarios
+                    SET nome_usuario = %s, email_usuario = %s, senha = %s, cargo_usuario = %s,
+                        status_usuario = %s, nivel_experiencia = %s, disponibilidade_tecnico = %s,
+                        telefone_usuario = %s, data_nasc_usuario = %s, id_setor = %s
+                    WHERE id_usuario = %s
+                    """,
+                    (
+                        nome_usuario, email_usuario.strip().lower(), hash_senha(nova_senha),
+                        cargo_usuario, status_usuario, nivel_experiencia, disponibilidade_tecnico,
+                        telefone_usuario, data_nasc_usuario, id_setor, id_usuario,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE Usuarios
+                    SET nome_usuario = %s, email_usuario = %s, cargo_usuario = %s,
+                        status_usuario = %s, nivel_experiencia = %s, disponibilidade_tecnico = %s,
+                        telefone_usuario = %s, data_nasc_usuario = %s, id_setor = %s
+                    WHERE id_usuario = %s
+                    """,
+                    (
+                        nome_usuario, email_usuario.strip().lower(), cargo_usuario, status_usuario,
+                        nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                        data_nasc_usuario, id_setor, id_usuario,
+                    ),
+                )
+    finally:
+        conn.close()
+    listar_usuarios.clear()
+    listar_setores.clear()
+    listar_tecnicos.clear()
+
+
+@st.dialog("Novo Usuário")
+def dialog_novo_usuario():
+    mapa_setores = _mapa_setores()
+    if not mapa_setores:
+        st.warning("Cadastre um setor antes de adicionar um usuário.")
+
+    nome = st.text_input("Nome completo")
+    email = st.text_input("E-mail", placeholder="nome@empresa.com")
+    senha = st.text_input("Senha", type="password")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cargo = st.selectbox("Cargo", CARGO_USUARIO_OPCOES)
+    with c2:
+        status = st.selectbox("Status", STATUS_USUARIO_OPCOES)
+
+    is_tecnico = cargo == "Tecnico"
+    c3, c4 = st.columns(2)
+    with c3:
+        nivel = st.selectbox("Nível de experiência", NIVEL_EXPERIENCIA_OPCOES)
+    with c4:
+        if is_tecnico:
+            disponibilidade = st.selectbox("Disponibilidade", DISPONIBILIDADE_TECNICO_OPCOES)
+        else:
+            disponibilidade = None
+            st.caption("Disponibilidade se aplica apenas a técnicos.")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        telefone = st.text_input("Telefone", placeholder="(00) 00000-0000")
+    with c6:
+        data_nasc = st.date_input("Data de nascimento", value=None)
+
+    setor_nome = st.selectbox("Setor", list(mapa_setores.keys())) if mapa_setores else None
+
+    if st.button("Salvar Usuário", type="primary"):
+        if not nome or not email or not senha or not setor_nome:
+            st.error("Preencha nome, e-mail, senha e setor.")
+        else:
+            with st.spinner("Salvando usuário..."):
+                try:
+                    criar_usuario(
+                        nome, email, senha, cargo, status, nivel, disponibilidade,
+                        telefone, data_nasc, mapa_setores[setor_nome],
+                    )
+                    st.success("Usuário criado com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Usuário")
+def dialog_editar_usuario(row):
+    mapa_setores = _mapa_setores()
+
+    nome = st.text_input("Nome completo", value=row["nome_usuario"])
+    email = st.text_input("E-mail", value=row["email_usuario"])
+    nova_senha = st.text_input("Nova senha (deixe em branco para manter a atual)", type="password")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cargo = st.selectbox(
+            "Cargo", CARGO_USUARIO_OPCOES,
+            index=CARGO_USUARIO_OPCOES.index(row["cargo_usuario"])
+            if row["cargo_usuario"] in CARGO_USUARIO_OPCOES else 0,
+        )
+    with c2:
+        status = st.selectbox(
+            "Status", STATUS_USUARIO_OPCOES,
+            index=STATUS_USUARIO_OPCOES.index(row["status_usuario"])
+            if row["status_usuario"] in STATUS_USUARIO_OPCOES else 0,
+        )
+
+    is_tecnico = cargo == "Tecnico"
+    c3, c4 = st.columns(2)
+    with c3:
+        nivel = st.selectbox(
+            "Nível de experiência", NIVEL_EXPERIENCIA_OPCOES,
+            index=NIVEL_EXPERIENCIA_OPCOES.index(row["nivel_experiencia"])
+            if row["nivel_experiencia"] in NIVEL_EXPERIENCIA_OPCOES else 0,
+        )
+    with c4:
+        if is_tecnico:
+            disp_atual = row.get("disponibilidade_tecnico")
+            idx_disp = (
+                DISPONIBILIDADE_TECNICO_OPCOES.index(disp_atual)
+                if disp_atual in DISPONIBILIDADE_TECNICO_OPCOES else 0
+            )
+            disponibilidade = st.selectbox("Disponibilidade", DISPONIBILIDADE_TECNICO_OPCOES, index=idx_disp)
+        else:
+            disponibilidade = None
+            st.caption("Disponibilidade se aplica apenas a técnicos.")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        telefone = st.text_input("Telefone", value=row["telefone_usuario"] or "")
+    with c6:
+        data_nasc = st.date_input("Data de nascimento", value=row["data_nasc_usuario"])
+
+    nomes_setores = list(mapa_setores.keys())
+    setor_atual = row.get("nome_setor")
+    idx_setor = nomes_setores.index(setor_atual) if setor_atual in nomes_setores else 0
+    setor_nome = st.selectbox("Setor", nomes_setores, index=idx_setor) if nomes_setores else None
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_usuario(
+                    row["id_usuario"], nome, email, cargo, status, nivel, disponibilidade,
+                    telefone, data_nasc, mapa_setores[setor_nome], nova_senha or None,
+                )
+                st.success("Usuário atualizado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
 
 
 @st.dialog("Confirmar exclusão")
@@ -2371,7 +2854,7 @@ if st.session_state.logged_in:
 
         if st.session_state.pagina == "dashboard":
             st.markdown(
-                '<div class="topbar-sub">Visão geral da operação: ordens de serviço, ativos, equipe e estoque.</div>',
+                '<div class="topbar-sub">Visão geral da operação: solicitações de serviço, ativos, equipe e estoque.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -2379,7 +2862,7 @@ if st.session_state.logged_in:
                 try:
                     ordens_dash = listar_ordens_servico()
                 except Exception as e:
-                    st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                    st.error(f"Não foi possível carregar as Solicitação de Serviço: {e}")
                     ordens_dash = []
                 try:
                     maquinas_dash = listar_maquinas()
@@ -2480,7 +2963,7 @@ if st.session_state.logged_in:
                     )
                     grafico_barras(df_pend, "Quantidade", cor_padrao="#2563eb", horizontal=True)
                 else:
-                    st.caption("Nenhuma OS pendente com técnico atribuído.")
+                    st.caption("Nenhuma SS pendente com técnico atribuído.")
                 st.markdown("</div>", unsafe_allow_html=True)
             with g4:
                 st.markdown('<div class="chart-card"><div class="chart-title">Máquinas por status operacional</div>', unsafe_allow_html=True)
@@ -2508,7 +2991,7 @@ if st.session_state.logged_in:
                 f'<div class="kpi-label">Técnicos disponíveis agora</div></div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<div class="chart-card"><div class="chart-title">Últimas Ordens de Serviço</div>', unsafe_allow_html=True)
+            st.markdown('<div class="chart-card"><div class="chart-title">Últimas Solicitações de Serviço</div>', unsafe_allow_html=True)
             if ordens_dash:
                 ultimas = ordens_dash[:6]
                 h1, h2, h3, h4, h5 = st.columns([0.6, 1.2, 2.6, 1.3, 1])
@@ -2523,14 +3006,14 @@ if st.session_state.logged_in:
                     slug = status_slug(row["status_os"])
                     c5.markdown(f'<span class="status-badge status-{slug}">{row["status_os"]}</span>', unsafe_allow_html=True)
             else:
-                st.caption("Nenhuma OS cadastrada.")
+                st.caption("Nenhuma SS cadastrada.")
             st.markdown("</div>", unsafe_allow_html=True)
 
             st.stop()
 
         if st.session_state.pagina == "agenda":
             st.markdown(
-                '<div class="topbar-sub">Programação das Ordens de Serviço por data e técnico — integrada ao Google Calendar.</div>',
+                '<div class="topbar-sub">Programação das Solicitações de Serviço por data e técnico — integrada ao Google Calendar.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -2540,16 +3023,16 @@ if st.session_state.logged_in:
             if not gcal_ativo:
                 st.info(
                     "Google Calendar não configurado. Adicione a seção [google_calendar] em "
-                    "secrets.toml para sincronizar as OS com um calendário compartilhado."
+                    "secrets.toml para sincronizar as Solicitações de Serviço com um calendário compartilhado."
                 )
             elif erro_gcal:
                 st.warning(f"Google Calendar: {erro_gcal}")
 
             try:
-                with st.spinner("Carregando ordens de serviço..."):
+                with st.spinner("Carregando solicitações de serviço..."):
                     ordens_agenda = listar_ordens_servico()
             except Exception as e:
-                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                st.error(f"Não foi possível carregar as Solicitações de Serviço: {e}")
                 ordens_agenda = []
 
             hoje = agora_brasil().date()
@@ -2564,7 +3047,7 @@ if st.session_state.logged_in:
                         qtd = sincronizar_intervalo_com_google(
                             ordens_agenda, hoje - timedelta(days=1), hoje + timedelta(days=7)
                         )
-                    st.success(f"{qtd} OS sincronizada(s) com o Google Calendar.")
+                    st.success(f"{qtd} SS sincronizada(s) com o Google Calendar.")
                     st.rerun()
 
             os_do_dia = [o for o in ordens_agenda if o["data_abertura"] == data_selecionada]
@@ -2581,23 +3064,23 @@ if st.session_state.logged_in:
             k1, k2, k3, k4 = st.columns(4)
             k1.markdown(
                 f'<div class="kpi-card"><div class="kpi-value">{len(os_do_dia)}</div>'
-                f'<div class="kpi-label">OS na data selecionada</div></div>', unsafe_allow_html=True)
+                f'<div class="kpi-label">SS na data selecionada</div></div>', unsafe_allow_html=True)
             k2.markdown(
                 f'<div class="kpi-card kpi-blue"><div class="kpi-value">{len(os_semana)}</div>'
-                f'<div class="kpi-label">OS nos próximos 7 dias</div></div>', unsafe_allow_html=True)
+                f'<div class="kpi-label">SS nos próximos 7 dias</div></div>', unsafe_allow_html=True)
             pendentes_total = sum(1 for o in ordens_agenda if o["status_os"] != "Concluído")
             k3.markdown(
                 f'<div class="kpi-card kpi-red"><div class="kpi-value">{pendentes_total}</div>'
-                f'<div class="kpi-label">OS pendentes no total</div></div>', unsafe_allow_html=True)
+                f'<div class="kpi-label">SS pendentes no total</div></div>', unsafe_allow_html=True)
             k4.markdown(
                 f'<div class="kpi-card" style="border-left-color:#6d28d9;"><div class="kpi-value">{len(eventos_externos_dia)}</div>'
                 f'<div class="kpi-label">Eventos externos no Google (data selecionada)</div></div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            st.markdown(f'<div class="chart-title">Ordens de Serviço em {data_selecionada.strftime("%d/%m/%Y")}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="chart-title">Solicitações de Serviço em {data_selecionada.strftime("%d/%m/%Y")}</div>', unsafe_allow_html=True)
             if not os_do_dia:
-                st.info("Nenhuma OS agendada para esta data.")
+                st.info("Nenhuma SS agendada para esta data.")
             else:
                 h1, h2, h3, h4, h5 = st.columns([1, 1.2, 2.4, 1.4, 1])
                 for col, texto in zip((h1, h2, h3, h4, h5), ("Horário", "Equipamento", "Descrição", "Técnico", "Status")):
@@ -2642,7 +3125,7 @@ if st.session_state.logged_in:
                 with st.container(key=f"agenda_dia_{dia.isoformat()}"):
                     st.markdown(
                         f'<div class="os-row"><b>{dia.strftime("%d/%m/%Y")}</b> '
-                        f'<span class="os-cell-muted">— {len(os_dia)} OS</span></div>',
+                        f'<span class="os-cell-muted">— {len(os_dia)} SS</span></div>',
                         unsafe_allow_html=True,
                     )
 
@@ -2655,14 +3138,14 @@ if st.session_state.logged_in:
             )
 
             try:
-                with st.spinner("Carregando ordens de serviço..."):
+                with st.spinner("Carregando solicitações de serviço..."):
                     ordens_rel = listar_ordens_servico()
             except Exception as e:
-                st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+                st.error(f"Não foi possível carregar as Solicitações de Serviço: {e}")
                 ordens_rel = []
 
             if not ordens_rel:
-                st.info("Nenhuma OS cadastrada para gerar relatórios.")
+                st.info("Nenhuma SS cadastrada para gerar relatórios.")
                 st.stop()
 
             df_os = pd.DataFrame(ordens_rel)
@@ -2700,7 +3183,7 @@ if st.session_state.logged_in:
             k1, k2, k3, k4 = st.columns(4)
             k1.markdown(
                 f'<div class="kpi-card"><div class="kpi-value">{total_periodo}</div>'
-                f'<div class="kpi-label">OS no período</div></div>', unsafe_allow_html=True)
+                f'<div class="kpi-label">SS no período</div></div>', unsafe_allow_html=True)
             k2.markdown(
                 f'<div class="kpi-card kpi-green"><div class="kpi-value">{concluidas_periodo}</div>'
                 f'<div class="kpi-label">Concluídas</div></div>', unsafe_allow_html=True)
@@ -2715,7 +3198,7 @@ if st.session_state.logged_in:
 
             g1, g2 = st.columns(2)
             with g1:
-                st.markdown('<div class="chart-card"><div class="chart-title">OS por status (período filtrado)</div>', unsafe_allow_html=True)
+                st.markdown('<div class="chart-card"><div class="chart-title">SS por status (período filtrado)</div>', unsafe_allow_html=True)
                 if not df_filtro.empty:
                     df_status_rel = (
                         df_filtro["status_os"].value_counts()
@@ -2726,7 +3209,7 @@ if st.session_state.logged_in:
                     st.caption("Sem dados para o período/técnico selecionado.")
                 st.markdown("</div>", unsafe_allow_html=True)
             with g2:
-                st.markdown('<div class="chart-card"><div class="chart-title">OS por técnico (período filtrado)</div>', unsafe_allow_html=True)
+                st.markdown('<div class="chart-card"><div class="chart-title">SS por técnico (período filtrado)</div>', unsafe_allow_html=True)
                 if not df_filtro.empty and df_filtro["tecnico"].notna().any():
                     df_tec_rel = (
                         df_filtro["tecnico"].dropna().value_counts()
@@ -2737,7 +3220,7 @@ if st.session_state.logged_in:
                     st.caption("Sem dados para o período/técnico selecionado.")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown('<div class="chart-card"><div class="chart-title">Evolução mensal de abertura de OS</div>', unsafe_allow_html=True)
+            st.markdown('<div class="chart-card"><div class="chart-title">Evolução mensal de abertura de SS</div>', unsafe_allow_html=True)
             if not df_filtro.empty:
                 df_mensal = df_filtro.copy()
                 df_mensal["mes"] = pd.to_datetime(df_mensal["data_abertura"].astype(str)).dt.to_period("M").astype(str)
@@ -2777,7 +3260,7 @@ if st.session_state.logged_in:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<div class="chart-title">Indicadores de Manutenção</div>', unsafe_allow_html=True)
             st.caption(
-                "MTTR e MTBF consideram apenas OS com horário de início/fim válidos; a "
+                "MTTR e MTBF consideram apenas SS com horário de início/fim válidos; a "
                 "disponibilidade reflete o cadastro atual de máquinas (não é filtrada por período)."
             )
 
@@ -2790,7 +3273,7 @@ if st.session_state.logged_in:
                 f'<div class="kpi-label">MTBF · Tempo médio entre falhas</div></div>', unsafe_allow_html=True)
             i3.markdown(
                 f'<div class="kpi-card kpi-red"><div class="kpi-value">{indicadores["backlog_total"]}</div>'
-                f'<div class="kpi-label">Backlog · OS pendentes no período</div></div>', unsafe_allow_html=True)
+                f'<div class="kpi-label">Backlog · SS pendentes no período</div></div>', unsafe_allow_html=True)
             i4.markdown(
                 f'<div class="kpi-card"><div class="kpi-value">{disponibilidade_display}</div>'
                 f'<div class="kpi-label">Disponibilidade dos equipamentos</div></div>', unsafe_allow_html=True)
@@ -2803,20 +3286,20 @@ if st.session_state.logged_in:
                 if not indicadores["df_backlog"].empty:
                     grafico_barras(indicadores["df_backlog"], "Quantidade", cor_padrao="#dc2626")
                 else:
-                    st.caption("Nenhuma OS pendente no período/técnico selecionado.")
+                    st.caption("Nenhuma SS pendente no período/técnico selecionado.")
                 st.markdown("</div>", unsafe_allow_html=True)
             with gi2:
                 st.markdown('<div class="chart-card"><div class="chart-title">MTTR ao longo do tempo (horas)</div>', unsafe_allow_html=True)
                 if not indicadores["mttr_mensal"].empty:
                     grafico_area(indicadores["mttr_mensal"], "MTTR (h)", cor="#dc2626")
                 else:
-                    st.caption("Sem OS concluídas com horários registrados no período.")
+                    st.caption("Sem SS concluídas com horários registrados no período.")
                 st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown('<div class="chart-title">Detalhamento das Ordens de Serviço</div>', unsafe_allow_html=True)
+            st.markdown('<div class="chart-title">Detalhamento das Solicitações de Serviço</div>', unsafe_allow_html=True)
             if df_filtro.empty:
-                st.info("Nenhuma OS encontrada para os filtros selecionados.")
+                st.info("Nenhuma SS encontrada para os filtros selecionados.")
             else:
                 st.dataframe(
                     df_filtro[["id_os", "tag_equipamento", "descricao_falha", "data_abertura", "tecnico", "status_os"]]
@@ -2831,7 +3314,7 @@ if st.session_state.logged_in:
                 st.download_button(
                     "⬇️ Exportar CSV",
                     data=csv_bytes,
-                    file_name=f"relatorio_os_{data_ini}_{data_fim}.csv",
+                    file_name=f"relatorio_ss_{data_ini}_{data_fim}.csv",
                     mime="text/csv",
                 )
 
@@ -2839,7 +3322,7 @@ if st.session_state.logged_in:
 
         if st.session_state.pagina != "ordens_servico":
             st.markdown('<div class="topbar-sub">Esta página ainda não foi implementada.</div>', unsafe_allow_html=True)
-            st.info("Em construção — por enquanto Ordens de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
+            st.info("Em construção — por enquanto Solicitações de Serviço, Máquinas, Setores, Almoxarifado de Peças, Ferramentas, Matriz de Risco/EPI e Usuários estão conectados ao banco.")
             st.stop()
 
         st.markdown(
@@ -2852,30 +3335,30 @@ if st.session_state.logged_in:
             with st.container(key="topbar_search"):
                 st.text_input(
                     "Buscar",
-                    key="os_busca",
-                    placeholder="Buscar OS, equipamento, técnico...",
+                    key="ss_busca",
+                    placeholder="Buscar SS, equipamento, técnico...",
                     label_visibility="collapsed",
                 )
         with botao_col:
             with st.container(key="nova_os_btn"):
-                if st.button("+ Nova OS", use_container_width=True):
+                if st.button("+ Nova SS", use_container_width=True):
                     dialog_nova_os()
 
         try:
-            with st.spinner("Carregando ordens de serviço..."):
+            with st.spinner("Carregando solicitações de serviço..."):
                 ordens = listar_ordens_servico(st.session_state.os_busca)
         except Exception as e:
-            st.error(f"Não foi possível carregar as Ordens de Serviço: {e}")
+            st.error(f"Não foi possível carregar as solicitações de Serviço: {e}")
             ordens = []
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         if not ordens:
-            st.info("Nenhuma Ordem de Serviço encontrada.")
+            st.info("Nenhuma Solicitação de Serviço encontrada.")
         else:
             h1, h2, h3, h4, h5, h6, h7 = st.columns([0.6, 1, 2.4, 1.3, 1.2, 1, 0.8])
             for col, texto in zip((h1, h2, h3, h4, h5, h6, h7),
-                                   ("OS", "Equipamento", "Descrição", "Abertura", "Técnico", "Status", "Ações")):
+                                   ("SS", "Equipamento", "Descrição", "Abertura", "Técnico", "Status", "Ações")):
                 col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
 
             ordens_pagina = paginar_lista(ordens, "ordens_servico")
@@ -2919,9 +3402,9 @@ with st.container(key="unified_panel"):
     with st.container(key="rocket_panel"):
         st.markdown("""
 <div class="brand-box">
-<div class="brand-icon">🔧</div>
+<div class="brand-icon">🛠️</div>
 <div>
-<div class="brand-title">THAF Manutenção</div>
+<div class="brand-title">Portal da Manutenção</div>
 <div class="brand-sub">Gestão Industrial</div>
 </div>
 </div>
@@ -2935,8 +3418,8 @@ with st.container(key="unified_panel"):
 </div>
 
 <div class="rocket-tagline">
-Gestão inteligente da manutenção industrial.
-<span>Ordens de serviço, ativos, peças e equipe — tudo em um único lugar, sempre disponível.</span>
+Inovação com Eficiência e Simplicidade.
+<span>Manutenção é Planejar, Executar, Monitorar e Aprimorar.</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -2958,7 +3441,7 @@ Gestão inteligente da manutenção industrial.
 
         if segundos_bloqueio_restantes > 0:
             st.warning(
-                f"Muitas tentativas de login incorretas. Tente novamente em {segundos_bloqueio_restantes} segundo(s)."
+                f"Tentativas de login incorreta. Tente novamente em {segundos_bloqueio_restantes} segundo(s)."
             )
 
         st.text_input(
@@ -2971,7 +3454,7 @@ Gestão inteligente da manutenção industrial.
         )
 
         st.markdown(
-            '<div class="login-row"><span>☐ Lembrar de mim</span>'
+            '<div class="login-row"><span>☐ Lembrar senha</span>'
             '<span class="login-link">Esqueceu a senha?</span></div>',
             unsafe_allow_html=True,
         )
@@ -2984,7 +3467,7 @@ Gestão inteligente da manutenção industrial.
         with st.container(key="entrar_btn_wrap"):
             st.button("→  Entrar", on_click=do_login, disabled=segundos_bloqueio_restantes > 0)
 
-        st.markdown('<div class="demo-label">Acesso rápido (usuários reais)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="demo-label">Acesso rápido</div>', unsafe_allow_html=True)
 
         d1, d2 = st.columns(2)
         colunas = [d1, d2, d1, d2]
