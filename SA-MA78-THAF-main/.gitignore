@@ -1,7 +1,0 @@
-# Ignorar configurações locais e senhas do Streamlit
-.streamlit/secrets.toml
-.streamlit/
-
-# Caso use variáveis de ambiente padrão do python depois
-.env
-__pycache__/
