@@ -1,0 +1,457 @@
+"""
+Módulo de Usuários — CRUD, dialogs e renderização da página "Usuários".
+
+Depende de:
+    core.db.get_connection
+    core.theme.status_slug, paginar_lista
+    core.charts.grafico_barras
+"""
+
+import streamlit as st
+import pandas as pd
+
+from core.db import get_connection
+from core.theme import status_slug, paginar_lista
+from core.charts import grafico_barras
+
+
+# ============================================================================
+# OPÇÕES / CONSTANTES
+# ============================================================================
+CARGO_USUARIO_OPCOES = ["CEO", "Gerente", "Supervisor", "Tecnico"]
+STATUS_USUARIO_OPCOES = ["Ativo", "Inativo"]
+DISPONIBILIDADE_TECNICO_OPCOES = ["Disponível", "Em Campo", "Férias", "Afastado"]
+NIVEL_EXPERIENCIA_OPCOES = ["Júnior", "Pleno", "Sênior"]
+
+DISPONIBILIDADE_CORES = {
+    "Disponível": "#16a34a",
+    "Em Campo": "#2563eb",
+    "Férias": "#a16207",
+    "Afastado": "#dc2626",
+}
+
+
+# ============================================================================
+# ACESSO A DADOS
+# ============================================================================
+@st.cache_data(ttl=30)
+def listar_usuarios(busca: str = ""):
+    """Lista os usuários com o nome do setor (JOIN com Setores)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            sql = """
+                SELECT u.id_usuario, u.nome_usuario, u.email_usuario, u.cargo_usuario,
+                       u.status_usuario, u.nivel_experiencia, u.disponibilidade_tecnico,
+                       u.telefone_usuario, u.data_nasc_usuario, u.data_cadastro,
+                       u.id_setor, s.nome_setor
+                FROM Usuarios u
+                LEFT JOIN Setores s ON s.id_setor = u.id_setor
+            """
+            params = ()
+            if busca:
+                sql += """
+                    WHERE u.nome_usuario LIKE %s OR u.email_usuario LIKE %s
+                       OR u.cargo_usuario LIKE %s OR s.nome_setor LIKE %s
+                """
+                like = f"%{busca}%"
+                params = (like, like, like, like)
+            sql += " ORDER BY u.nome_usuario"
+            cur.execute(sql, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=30)
+def listar_tecnicos():
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id_usuario, nome_usuario FROM Usuarios "
+                "WHERE cargo_usuario = 'Tecnico' AND status_usuario = 'Ativo' "
+                "ORDER BY nome_usuario"
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _mapa_setores():
+    """Importado tardiamente para evitar dependência circular com o módulo
+    de Setores; se preferir, mova para core/lookups.py e importe direto."""
+    from pages.setores import listar_setores
+    try:
+        return {s["nome_setor"]: s["id_setor"] for s in listar_setores()}
+    except Exception:
+        return {}
+
+
+def _invalidar_caches_relacionados():
+    listar_usuarios.clear()
+    listar_tecnicos.clear()
+    try:
+        from pages.setores import listar_setores
+        listar_setores.clear()  # total_usuarios por setor muda
+    except Exception:
+        pass
+
+
+def hash_senha(senha: str) -> str:
+    import hashlib
+    return hashlib.sha1(senha.encode("utf-8")).hexdigest()
+
+
+def criar_usuario(nome_usuario, email_usuario, senha, cargo_usuario, status_usuario,
+                   nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                   data_nasc_usuario, id_setor):
+    from core.db import agora_brasil
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO Usuarios
+                    (nome_usuario, email_usuario, senha, cargo_usuario, status_usuario,
+                     nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                     data_nasc_usuario, data_cadastro, id_setor)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    nome_usuario, email_usuario.strip().lower(), hash_senha(senha),
+                    cargo_usuario, status_usuario, nivel_experiencia, disponibilidade_tecnico,
+                    telefone_usuario, data_nasc_usuario, agora_brasil(), id_setor,
+                ),
+            )
+    finally:
+        conn.close()
+    _invalidar_caches_relacionados()
+
+
+def atualizar_usuario(id_usuario, nome_usuario, email_usuario, cargo_usuario, status_usuario,
+                       nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                       data_nasc_usuario, id_setor, nova_senha=None):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if nova_senha:
+                cur.execute(
+                    """
+                    UPDATE Usuarios
+                    SET nome_usuario = %s, email_usuario = %s, senha = %s, cargo_usuario = %s,
+                        status_usuario = %s, nivel_experiencia = %s, disponibilidade_tecnico = %s,
+                        telefone_usuario = %s, data_nasc_usuario = %s, id_setor = %s
+                    WHERE id_usuario = %s
+                    """,
+                    (
+                        nome_usuario, email_usuario.strip().lower(), hash_senha(nova_senha),
+                        cargo_usuario, status_usuario, nivel_experiencia, disponibilidade_tecnico,
+                        telefone_usuario, data_nasc_usuario, id_setor, id_usuario,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE Usuarios
+                    SET nome_usuario = %s, email_usuario = %s, cargo_usuario = %s,
+                        status_usuario = %s, nivel_experiencia = %s, disponibilidade_tecnico = %s,
+                        telefone_usuario = %s, data_nasc_usuario = %s, id_setor = %s
+                    WHERE id_usuario = %s
+                    """,
+                    (
+                        nome_usuario, email_usuario.strip().lower(), cargo_usuario, status_usuario,
+                        nivel_experiencia, disponibilidade_tecnico, telefone_usuario,
+                        data_nasc_usuario, id_setor, id_usuario,
+                    ),
+                )
+    finally:
+        conn.close()
+    _invalidar_caches_relacionados()
+
+
+def excluir_usuario(id_usuario):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM Usuarios WHERE id_usuario = %s", (id_usuario,))
+    finally:
+        conn.close()
+    _invalidar_caches_relacionados()
+
+
+# ============================================================================
+# DIALOGS
+# ============================================================================
+@st.dialog("Confirmar exclusão")
+def dialog_confirmar_exclusao(mensagem: str, funcao_excluir, *args):
+    st.warning(f"⚠️ {mensagem}")
+    st.caption("Esta ação não pode ser desfeita.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Sim, excluir", type="primary", use_container_width=True):
+            with st.spinner("Excluindo..."):
+                try:
+                    funcao_excluir(*args)
+                    st.success("Excluído com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao excluir: {e}")
+    with c2:
+        if st.button("Cancelar", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("Novo Usuário")
+def dialog_novo_usuario():
+    mapa_setores = _mapa_setores()
+    if not mapa_setores:
+        st.warning("Cadastre um setor antes de adicionar um usuário.")
+
+    nome = st.text_input("Nome completo")
+    email = st.text_input("E-mail", placeholder="nome@empresa.com")
+    senha = st.text_input("Senha", type="password")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cargo = st.selectbox("Cargo", CARGO_USUARIO_OPCOES)
+    with c2:
+        status = st.selectbox("Status", STATUS_USUARIO_OPCOES)
+
+    is_tecnico = cargo == "Tecnico"
+    c3, c4 = st.columns(2)
+    with c3:
+        nivel = st.selectbox("Nível de experiência", NIVEL_EXPERIENCIA_OPCOES)
+    with c4:
+        if is_tecnico:
+            disponibilidade = st.selectbox("Disponibilidade", DISPONIBILIDADE_TECNICO_OPCOES)
+        else:
+            disponibilidade = None
+            st.caption("Disponibilidade se aplica apenas a técnicos.")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        telefone = st.text_input("Telefone", placeholder="(00) 00000-0000")
+    with c6:
+        data_nasc = st.date_input("Data de nascimento", value=None)
+
+    setor_nome = st.selectbox("Setor", list(mapa_setores.keys())) if mapa_setores else None
+
+    if st.button("Salvar Usuário", type="primary"):
+        if not nome or not email or not senha or not setor_nome:
+            st.error("Preencha nome, e-mail, senha e setor.")
+        else:
+            with st.spinner("Salvando usuário..."):
+                try:
+                    criar_usuario(
+                        nome, email, senha, cargo, status, nivel, disponibilidade,
+                        telefone, data_nasc, mapa_setores[setor_nome],
+                    )
+                    st.success("Usuário criado com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar no banco: {e}")
+
+
+@st.dialog("Editar Usuário")
+def dialog_editar_usuario(row):
+    mapa_setores = _mapa_setores()
+
+    nome = st.text_input("Nome completo", value=row["nome_usuario"])
+    email = st.text_input("E-mail", value=row["email_usuario"])
+    nova_senha = st.text_input("Nova senha (deixe em branco para manter a atual)", type="password")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cargo = st.selectbox(
+            "Cargo", CARGO_USUARIO_OPCOES,
+            index=CARGO_USUARIO_OPCOES.index(row["cargo_usuario"])
+            if row["cargo_usuario"] in CARGO_USUARIO_OPCOES else 0,
+        )
+    with c2:
+        status = st.selectbox(
+            "Status", STATUS_USUARIO_OPCOES,
+            index=STATUS_USUARIO_OPCOES.index(row["status_usuario"])
+            if row["status_usuario"] in STATUS_USUARIO_OPCOES else 0,
+        )
+
+    is_tecnico = cargo == "Tecnico"
+    c3, c4 = st.columns(2)
+    with c3:
+        nivel = st.selectbox(
+            "Nível de experiência", NIVEL_EXPERIENCIA_OPCOES,
+            index=NIVEL_EXPERIENCIA_OPCOES.index(row["nivel_experiencia"])
+            if row["nivel_experiencia"] in NIVEL_EXPERIENCIA_OPCOES else 0,
+        )
+    with c4:
+        if is_tecnico:
+            disp_atual = row.get("disponibilidade_tecnico")
+            idx_disp = (
+                DISPONIBILIDADE_TECNICO_OPCOES.index(disp_atual)
+                if disp_atual in DISPONIBILIDADE_TECNICO_OPCOES else 0
+            )
+            disponibilidade = st.selectbox("Disponibilidade", DISPONIBILIDADE_TECNICO_OPCOES, index=idx_disp)
+        else:
+            disponibilidade = None
+            st.caption("Disponibilidade se aplica apenas a técnicos.")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        telefone = st.text_input("Telefone", value=row["telefone_usuario"] or "")
+    with c6:
+        data_nasc = st.date_input("Data de nascimento", value=row["data_nasc_usuario"])
+
+    nomes_setores = list(mapa_setores.keys())
+    setor_atual = row.get("nome_setor")
+    idx_setor = nomes_setores.index(setor_atual) if setor_atual in nomes_setores else 0
+    setor_nome = st.selectbox("Setor", nomes_setores, index=idx_setor) if nomes_setores else None
+
+    if st.button("Salvar alterações", type="primary"):
+        with st.spinner("Salvando alterações..."):
+            try:
+                atualizar_usuario(
+                    row["id_usuario"], nome, email, cargo, status, nivel, disponibilidade,
+                    telefone, data_nasc, mapa_setores[setor_nome], nova_senha or None,
+                )
+                st.success("Usuário atualizado com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao atualizar no banco: {e}")
+
+
+# ============================================================================
+# RENDERIZAÇÃO DA PÁGINA
+# ============================================================================
+def render(TEMA: dict):
+    """Ponto de entrada chamado pelo main.py quando
+    st.session_state.pagina == 'usuarios'."""
+
+    st.markdown(
+        '<div class="topbar-sub">Equipe cadastrada, cargos, setores e disponibilidade dos técnicos.</div>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        with st.spinner("Carregando usuários..."):
+            todos_usuarios = listar_usuarios()
+    except Exception as e:
+        st.error(f"Não foi possível carregar os usuários: {e}")
+        todos_usuarios = []
+
+    total = len(todos_usuarios)
+    ativos = sum(1 for u in todos_usuarios if u["status_usuario"] == "Ativo")
+    inativos = sum(1 for u in todos_usuarios if u["status_usuario"] == "Inativo")
+    tecnicos_disponiveis = sum(
+        1 for u in todos_usuarios
+        if u["cargo_usuario"] == "Tecnico" and u["status_usuario"] == "Ativo"
+        and u["disponibilidade_tecnico"] == "Disponível"
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(
+        f'<div class="kpi-card"><div class="kpi-value">{total}</div>'
+        f'<div class="kpi-label">Usuários cadastrados</div></div>', unsafe_allow_html=True)
+    k2.markdown(
+        f'<div class="kpi-card kpi-green"><div class="kpi-value">{ativos}</div>'
+        f'<div class="kpi-label">Ativos</div></div>', unsafe_allow_html=True)
+    k3.markdown(
+        f'<div class="kpi-card kpi-red"><div class="kpi-value">{inativos}</div>'
+        f'<div class="kpi-label">Inativos</div></div>', unsafe_allow_html=True)
+    k4.markdown(
+        f'<div class="kpi-card kpi-blue"><div class="kpi-value">{tecnicos_disponiveis}</div>'
+        f'<div class="kpi-label">Técnicos disponíveis agora</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if todos_usuarios:
+        df_usuarios = pd.DataFrame(todos_usuarios)
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown('<div class="chart-card"><div class="chart-title">Usuários por cargo</div>', unsafe_allow_html=True)
+            df_cargo = (
+                df_usuarios["cargo_usuario"].value_counts()
+                .rename_axis("Cargo").reset_index(name="Quantidade").set_index("Cargo")
+            )
+            grafico_barras(df_cargo, "Quantidade", cor_padrao="#2563eb")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with g2:
+            st.markdown('<div class="chart-card"><div class="chart-title">Disponibilidade dos técnicos</div>', unsafe_allow_html=True)
+            df_tecnicos = df_usuarios[df_usuarios["cargo_usuario"] == "Tecnico"]
+            if not df_tecnicos.empty:
+                df_disp = (
+                    df_tecnicos["disponibilidade_tecnico"].value_counts()
+                    .rename_axis("Disponibilidade").reset_index(name="Quantidade").set_index("Disponibilidade")
+                )
+                grafico_barras(df_disp, "Quantidade", cores_mapa=DISPONIBILIDADE_CORES)
+            else:
+                st.caption("Nenhum técnico cadastrado.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    busca_col, botao_col = st.columns([3, 1])
+    with busca_col:
+        with st.container(key="topbar_search"):
+            st.text_input(
+                "Buscar",
+                key="usuarios_busca",
+                placeholder="Buscar por nome, e-mail, cargo ou setor...",
+                label_visibility="collapsed",
+            )
+    with botao_col:
+        with st.container(key="novo_usuario_btn"):
+            if st.button("+ Novo Usuário", use_container_width=True, key="btn_novo_usuario"):
+                dialog_novo_usuario()
+
+    try:
+        usuarios = listar_usuarios(st.session_state.get("usuarios_busca", ""))
+    except Exception as e:
+        st.error(f"Não foi possível carregar os usuários: {e}")
+        usuarios = []
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not usuarios:
+        st.info("Nenhum usuário encontrado.")
+        return
+
+    h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 1.3, 1.3, 1, 1.3, 1.2, 0.8])
+    for col, texto in zip((h1, h2, h3, h4, h5, h6, h7),
+                           ("Usuário", "Cargo", "Setor", "Status", "Disponibilidade", "Telefone", "Ações")):
+        col.markdown(f'<div class="os-header">{texto}</div>', unsafe_allow_html=True)
+
+    usuarios_pagina = paginar_lista(usuarios, "usuarios")
+    for row in usuarios_pagina:
+        with st.container(key=f"user_row_{row['id_usuario']}"):
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 1.3, 1.3, 1, 1.3, 1.2, 0.8])
+            iniciais = "".join(p[0].upper() for p in row["nome_usuario"].split()[:2])
+            c1.markdown(
+                f'<div class="user-name-cell"><div class="user-avatar">{iniciais}</div>'
+                f'<div><div class="os-cell"><b>{row["nome_usuario"]}</b></div>'
+                f'<div class="os-cell-muted">{row["email_usuario"]}</div></div></div>',
+                unsafe_allow_html=True,
+            )
+            c2.markdown(
+                f'<div class="os-cell">{row["cargo_usuario"]}</div>'
+                f'<div class="os-cell-muted">{row["nivel_experiencia"] or "—"}</div>',
+                unsafe_allow_html=True,
+            )
+            c3.markdown(f'<div class="os-cell">{row["nome_setor"] or "—"}</div>', unsafe_allow_html=True)
+            slug_status = status_slug(row["status_usuario"])
+            c4.markdown(f'<span class="status-badge status-{slug_status}">{row["status_usuario"]}</span>', unsafe_allow_html=True)
+            if row["cargo_usuario"] == "Tecnico" and row["disponibilidade_tecnico"]:
+                slug_disp = status_slug(row["disponibilidade_tecnico"])
+                c5.markdown(f'<span class="status-badge status-{slug_disp}">{row["disponibilidade_tecnico"]}</span>', unsafe_allow_html=True)
+            else:
+                c5.markdown('<div class="os-cell-muted">—</div>', unsafe_allow_html=True)
+            c6.markdown(f'<div class="os-cell">{row["telefone_usuario"]}</div>', unsafe_allow_html=True)
+
+            with c7:
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("✏️", key=f"editar_user_{row['id_usuario']}"):
+                        dialog_editar_usuario(row)
+                with b2:
+                    if st.button("🗑️", key=f"excluir_user_{row['id_usuario']}"):
+                        dialog_confirmar_exclusao(
+                            f"Excluir o usuário {row['nome_usuario']} permanentemente?",
+                            excluir_usuario, row["id_usuario"],
+                        )
